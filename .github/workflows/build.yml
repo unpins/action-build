@@ -128,7 +128,10 @@ jobs:
               ;;
             darwin)
               BIN="$(readlink -f result)/bin/${PKG}"
-              deps="$(otool -L "${BIN}")"
+              # otool -L's first line is the inspected binary's own path
+              # ("/nix/store/.../bin/${PKG}:"); skip it so the /nix/store
+              # check applies only to dependency lines.
+              deps="$(otool -L "${BIN}" | tail -n +2)"
               echo "${deps}"
               if grep -q "/nix/store" <<<"${deps}"; then
                 echo "::error::${PKG}: Darwin binary references /nix/store paths"
