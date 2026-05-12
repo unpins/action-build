@@ -1,0 +1,229 @@
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      package_name:
+        description: "Name of the package (also the binary name in result/bin/)"
+        type: string
+        required: true
+      package_data:
+        description: "Also publish a tarball of result/share (man pages, etc.)"
+        type: boolean
+        default: false
+      bootstrap_naming:
+        description: |
+          Name artifacts <pkg>-<arch>-<os>[.exe] (no version, arch before os)
+          instead of the default <pkg>-<version>-<os>-<arch>[.exe]. Use for
+          tools that ship via a stable bootstrap URL (e.g. `unpin` itself,
+          downloaded by hand from unpins.org). Other packages should leave
+          this off — `unpin install` parses GitHub asset names expecting the
+          default ordering.
+        type: boolean
+        default: false
+      create_release:
+        description: "Create a GitHub Release in the calling repo with all artifacts"
+        type: boolean
+        default: false
+      platforms:
+        description: |
+          JSON array of {runner, os, arch, attr?} objects. Defaults to all 4
+          native targets. To add cross-compiled Windows builds, add an entry
+          with os=windows and attr pointing at the cross derivation, e.g.
+          {"runner":"ubuntu-latest","os":"windows","arch":"x86_64",
+           "attr":"packages.x86_64-linux.\"windows-x86_64\""}
+          When attr is omitted the build target is .#default.
+        type: string
+        default: |
+          [
+            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"x86_64"},
+            {"runner":"ubuntu-24.04-arm", "os":"linux",  "arch":"aarch64"},
+            {"runner":"macos-13",         "os":"darwin", "arch":"x86_64"},
+            {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"}
+          ]
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platforms) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v25
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: unpins
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Resolve version
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${REF_TYPE}" = "tag" ]; then
+            VER="${REF_NAME#v}"
+          else
+            VER="snapshot-${GITHUB_SHA::7}"
+          fi
+          echo "version=${VER}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved version: ${VER}"
+
+      - name: Validate tag matches upstream version
+        if: github.ref_type == 'tag'
+        env:
+          TAG_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${TAG_VERSION}" =~ ^(.+)-([0-9]+)$ ]]; then
+            echo "::error::tag '${TAG_VERSION}' must match <upstream>-<pkgrel> (e.g. 3.4.1-2)"
+            exit 1
+          fi
+          UPSTREAM_FROM_TAG="${BASH_REMATCH[1]}"
+          PKGREL="${BASH_REMATCH[2]}"
+          UPSTREAM_FROM_NIX="$(nix eval --raw .#default.version)"
+          if [ "${UPSTREAM_FROM_TAG}" != "${UPSTREAM_FROM_NIX}" ]; then
+            echo "::error::tag declares upstream ${UPSTREAM_FROM_TAG} but flake builds ${UPSTREAM_FROM_NIX}"
+            exit 1
+          fi
+          echo "Tag v${TAG_VERSION} matches upstream ${UPSTREAM_FROM_NIX} (pkgrel ${PKGREL})"
+
+      - name: nix build
+        env:
+          ATTR: ${{ matrix.attr }}
+        run: |
+          set -euo pipefail
+          # Default to .#default; cross builds expose under packages.<host>.<name>
+          # and the caller passes the full attr path via matrix.attr.
+          TARGET=".#${ATTR:-default}"
+          echo "Building ${TARGET}"
+          nix build "${TARGET}" --print-build-logs
+
+      - name: Verify binary is portable
+        env:
+          PKG: ${{ inputs.package_name }}
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          case "${OS}" in
+            linux)
+              BIN="$(readlink -f result)/bin/${PKG}"
+              info="$(file -b "${BIN}")"
+              echo "${info}"
+              if ! grep -q "statically linked" <<<"${info}"; then
+                echo "::error::${PKG}: Linux binary is not statically linked"
+                exit 1
+              fi
+              ;;
+            darwin)
+              BIN="$(readlink -f result)/bin/${PKG}"
+              deps="$(otool -L "${BIN}")"
+              echo "${deps}"
+              if grep -q "/nix/store" <<<"${deps}"; then
+                echo "::error::${PKG}: Darwin binary references /nix/store paths"
+                exit 1
+              fi
+              ;;
+            windows)
+              BIN="$(readlink -f result)/bin/${PKG}.exe"
+              # Reject any companion DLL in the same directory — unpins ships
+              # single-binary artifacts only.
+              extras="$(find "$(dirname "${BIN}")" -maxdepth 1 -type f -name '*.dll' -o -name '*.DLL')"
+              if [ -n "${extras}" ]; then
+                echo "::error::${PKG}: companion DLLs present alongside .exe:"
+                printf '%s\n' "${extras}"
+                exit 1
+              fi
+              # Inspect imports with the cross binutils' objdump (GNU
+              # objdump on the runner doesn't surface the DLL Name field).
+              imports="$(nix shell nixpkgs#pkgsCross.mingwW64.buildPackages.binutils-unwrapped \
+                --command x86_64-w64-mingw32-objdump -p "${BIN}" \
+                | awk '/DLL Name:/ {print $NF}')"
+              echo "${imports}"
+              # Reject any "lib*.dll" import — convention is that runtime/3rd
+              # party DLLs are named libfoo-N.dll while system DLLs use
+              # uppercase Microsoft naming (KERNEL32, USER32, MSVCRT, ...).
+              bad="$(echo "${imports}" | grep -iE '^lib.*\.dll$' || true)"
+              if [ -n "${bad}" ]; then
+                echo "::error::${PKG}: imports non-system DLL(s):"
+                printf '%s\n' "${bad}"
+                exit 1
+              fi
+              ;;
+          esac
+
+      - name: Stage artifacts
+        id: stage
+        env:
+          PKG: ${{ inputs.package_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+          WANT_DATA: ${{ inputs.package_data }}
+          BOOTSTRAP: ${{ inputs.bootstrap_naming }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          OUT_DIR="$(readlink -f result)"
+          # Default: <pkg>-<version>-<os>-<arch>[.exe] — `unpin install` parses
+          # asset names expecting this layout.
+          # Bootstrap: <pkg>-<arch>-<os>[.exe] — stable filename for tools
+          # users download by hand (the unpin CLI from unpins.org).
+          if [ "${BOOTSTRAP}" = "true" ]; then
+            STEM="${PKG}-${ARCH}-${OS}"
+            DATA_STEM="${PKG}-data-${ARCH}-${OS}"
+          else
+            STEM="${PKG}-${VERSION}-${OS}-${ARCH}"
+            DATA_STEM="${PKG}-data-${VERSION}-${OS}-${ARCH}"
+          fi
+          if [ "${OS}" = "windows" ]; then
+            BIN_NAME="${STEM}.exe"
+            cp "${OUT_DIR}/bin/${PKG}.exe" "out/${BIN_NAME}"
+          else
+            BIN_NAME="${STEM}"
+            cp "${OUT_DIR}/bin/${PKG}" "out/${BIN_NAME}"
+          fi
+
+          if [ "${WANT_DATA}" = "true" ] && [ -d "${OUT_DIR}/share" ]; then
+            DATA_NAME="${DATA_STEM}.tar.zst"
+            tar --zstd -cf "out/${DATA_NAME}" -C "${OUT_DIR}" share
+          fi
+
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package_name }}-${{ steps.ver.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: release
+    if: inputs.create_release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - run: ls -lh dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

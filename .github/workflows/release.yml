@@ -1,0 +1,87 @@
+name: release
+
+# Reusable workflow for one-click releases.
+#
+# Reads the upstream version from `nix eval .#default.version`, looks at all
+# existing `v<upstream>-N` tags, computes the next pkgrel (max + 1, or 1 if
+# the upstream is new), creates and pushes the tag, then delegates to build.yml
+# with create_release: true.
+
+on:
+  workflow_call:
+    inputs:
+      package_name:
+        type: string
+        required: true
+      package_data:
+        type: boolean
+        default: false
+      bootstrap_naming:
+        type: boolean
+        default: false
+      platforms:
+        type: string
+        default: |
+          [
+            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"x86_64"},
+            {"runner":"ubuntu-24.04-arm", "os":"linux",  "arch":"aarch64"},
+            {"runner":"macos-13",         "os":"darwin", "arch":"x86_64"},
+            {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"}
+          ]
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+
+jobs:
+  tag:
+    name: compute and push tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.compute.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need all tags
+
+      - uses: cachix/install-nix-action@v25
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - id: compute
+        run: |
+          set -euo pipefail
+          UP="$(nix eval --raw .#default.version)"
+          if [ -z "${UP}" ]; then
+            echo "::error::could not resolve upstream version from .#default.version"
+            exit 1
+          fi
+          MAX=0
+          while IFS= read -r t; do
+            [ -z "${t}" ] && continue
+            r="${t##*-}"
+            [[ "${r}" =~ ^[0-9]+$ ]] || continue
+            if [ "${r}" -gt "${MAX}" ]; then MAX="${r}"; fi
+          done < <(git tag -l "v${UP}-*")
+          NEW=$(( MAX + 1 ))
+          TAG="v${UP}-${NEW}"
+          echo "Computed tag: ${TAG}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "release ${TAG}"
+          git push origin "${TAG}"
+
+  build:
+    needs: tag
+    uses: unpins/action-build/.github/workflows/build.yml@main
+    with:
+      package_name: ${{ inputs.package_name }}
+      package_data: ${{ inputs.package_data }}
+      bootstrap_naming: ${{ inputs.bootstrap_naming }}
+      create_release: true
+      platforms: ${{ inputs.platforms }}
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
