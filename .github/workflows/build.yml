@@ -190,9 +190,12 @@ jobs:
           BIN_SRC="${OUT_DIR}/bin/${PKG}${EXT}"
           # Primary artifact: <pkg>-<version>-<os>-<arch>[.exe].zst, single-file
           # zstd (no tar wrapper) — `unpin install` parses this naming.
+          # Use `nix run` rather than `nix shell --command`: in Nix 2.30+ the
+          # shell flag was made stricter and silently exits non-zero on some
+          # invocations, while `nix run -- args` stays stable.
           STEM_VER="${PKG}-${VERSION}-${OS}-${ARCH}"
-          nix shell nixpkgs#zstd --command \
-            zstd -19 -q -o "out/${STEM_VER}${EXT}.zst" "${BIN_SRC}"
+          nix run nixpkgs#zstd -- \
+            -19 -q -o "out/${STEM_VER}${EXT}.zst" "${BIN_SRC}"
           # Bootstrap (currently just `unpin`): also publish a versionless raw
           # binary so unpins.org's `/unpin-<arch>-<os>[.exe]` redirect lands on
           # an asset present in every release via GitHub's `releases/latest`.
