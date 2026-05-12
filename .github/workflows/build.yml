@@ -34,12 +34,6 @@ on:
           expose `packages.aarch64-darwin."darwin-x86_64"`. macos-13 (Intel
           native) is intentionally not used — increasingly scarce in the
           free pool and slower to schedule than the cross job.
-
-          To add cross-compiled Windows builds, append an entry with
-          os=windows and attr pointing at the cross derivation, e.g.
-          {"runner":"ubuntu-latest","os":"windows","arch":"x86_64",
-           "attr":"packages.x86_64-linux.\"windows-x86_64\""}
-          When attr is omitted the build target is .#default.
         type: string
         default: |
           [
@@ -48,18 +42,46 @@ on:
             {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"},
             {"runner":"macos-14",         "os":"darwin", "arch":"x86_64", "attr":"packages.aarch64-darwin.\"darwin-x86_64\""}
           ]
+      with_windows:
+        description: |
+          Also build a windows-x86_64 artifact via pkgsCross.mingwW64 from
+          the x86_64-linux runner. The package flake must expose
+          `packages.x86_64-linux."windows-x86_64"`.
+        type: boolean
+        default: false
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
 
 jobs:
+  matrix:
+    name: compute matrix
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.merge.outputs.include }}
+    steps:
+      - id: merge
+        env:
+          BASE: ${{ inputs.platforms }}
+          WIN: ${{ inputs.with_windows }}
+        run: |
+          set -euo pipefail
+          if [ "${WIN}" = "true" ]; then
+            WIN_ENTRY='{"runner":"ubuntu-latest","os":"windows","arch":"x86_64","attr":"packages.x86_64-linux.\"windows-x86_64\""}'
+            INCLUDE=$(jq -cn --argjson a "${BASE}" --argjson w "${WIN_ENTRY}" '$a + [$w]')
+          else
+            INCLUDE=$(jq -c . <<<"${BASE}")
+          fi
+          echo "include=${INCLUDE}" >> "${GITHUB_OUTPUT}"
+
   build:
+    needs: matrix
     name: build (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.platforms) }}
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
     steps:
       - uses: actions/checkout@v5
 

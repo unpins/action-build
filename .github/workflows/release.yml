@@ -28,6 +28,9 @@ on:
             {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"},
             {"runner":"macos-14",         "os":"darwin", "arch":"x86_64", "attr":"packages.aarch64-darwin.\"darwin-x86_64\""}
           ]
+      with_windows:
+        type: boolean
+        default: false
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
@@ -83,5 +86,6 @@ jobs:
       bootstrap_naming: ${{ inputs.bootstrap_naming }}
       create_release: true
       platforms: ${{ inputs.platforms }}
+      with_windows: ${{ inputs.with_windows }}
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
