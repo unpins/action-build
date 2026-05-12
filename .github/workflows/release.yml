@@ -2,10 +2,16 @@ name: release
 
 # Reusable workflow for one-click releases.
 #
-# Reads the upstream version from `nix eval .#default.version`, looks at all
-# existing `v<upstream>-N` tags, computes the next pkgrel (max + 1, or 1 if
-# the upstream is new), creates and pushes the tag, then delegates to build.yml
-# with create_release: true.
+# Reads the upstream version from `nix eval .#default.version`, computes the
+# next tag, pushes it, then delegates to build.yml with create_release: true.
+#
+# Tag format depends on `own_software`:
+#   false (default): v<upstream>-<pkgrel>, pkgrel auto-incremented from the
+#     highest existing v<upstream>-N tag (or 1 if the upstream is new). Use
+#     for packages of third-party tools (ffmpeg, jq, curl, etc.) where we
+#     may have multiple packaging revisions per upstream version.
+#   true: v<upstream>, no pkgrel. Errors if the tag already exists — bump
+#     the version in your flake to release again. Use for software we own.
 
 on:
   workflow_call:
@@ -31,6 +37,9 @@ on:
       with_windows:
         type: boolean
         default: false
+      own_software:
+        type: boolean
+        default: false
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
@@ -53,6 +62,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
 
       - id: compute
+        env:
+          OWN: ${{ inputs.own_software }}
         run: |
           set -euo pipefail
           UP="$(nix eval --raw .#default.version)"
@@ -60,15 +71,23 @@ jobs:
             echo "::error::could not resolve upstream version from .#default.version"
             exit 1
           fi
-          MAX=0
-          while IFS= read -r t; do
-            [ -z "${t}" ] && continue
-            r="${t##*-}"
-            [[ "${r}" =~ ^[0-9]+$ ]] || continue
-            if [ "${r}" -gt "${MAX}" ]; then MAX="${r}"; fi
-          done < <(git tag -l "v${UP}-*")
-          NEW=$(( MAX + 1 ))
-          TAG="v${UP}-${NEW}"
+          if [ "${OWN}" = "true" ]; then
+            TAG="v${UP}"
+            if [ -n "$(git tag -l "${TAG}")" ]; then
+              echo "::error::tag ${TAG} already exists. Bump the version in your flake to release again."
+              exit 1
+            fi
+          else
+            MAX=0
+            while IFS= read -r t; do
+              [ -z "${t}" ] && continue
+              r="${t##*-}"
+              [[ "${r}" =~ ^[0-9]+$ ]] || continue
+              if [ "${r}" -gt "${MAX}" ]; then MAX="${r}"; fi
+            done < <(git tag -l "v${UP}-*")
+            NEW=$(( MAX + 1 ))
+            TAG="v${UP}-${NEW}"
+          fi
           echo "Computed tag: ${TAG}"
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
