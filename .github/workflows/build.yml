@@ -3,35 +3,25 @@ name: build
 on:
   workflow_call:
     inputs:
+      # All inputs are optional fallbacks; the preferred source is the
+      # caller flake's `manifest` attr (see unpins/nix-lib's
+      # mkStandaloneFlake). Inputs override manifest only when they
+      # differ from their default (non-empty for strings, true for
+      # booleans), so workflows that have migrated to manifest can drop
+      # the `with:` block entirely.
       package_name:
-        description: "Name of the package (also the binary name in result/bin/)"
         type: string
-        required: true
+        default: ""
       package_data:
-        description: "Also publish a tarball of result/share (man pages, etc.)"
         type: boolean
         default: false
       bootstrap_naming:
-        description: |
-          In addition to the versioned artifact <pkg>-<version>-<arch>-<os>,
-          publish a versionless raw <pkg>-<arch>-<os>[.exe] for tools that
-          ship via a stable bootstrap URL (e.g. `unpin` itself, downloaded
-          by hand from unpins.org). Other packages should leave this off.
         type: boolean
         default: false
       create_release:
-        description: "Create a GitHub Release in the calling repo with all artifacts"
         type: boolean
         default: false
       platforms:
-        description: |
-          JSON array of {runner, os, arch, attr?} objects. Default covers the
-          4 native targets — note darwin-x86_64 is *cross-compiled* from the
-          aarch64-darwin runner via pkgsCross.x86_64-darwin (same single-
-          runner pattern as windows-from-linux), so the package flake must
-          expose `packages.aarch64-darwin."darwin-x86_64"`. macos-13 (Intel
-          native) is intentionally not used — increasingly scarce in the
-          free pool and slower to schedule than the cross job.
         type: string
         default: |
           [
@@ -41,19 +31,9 @@ on:
             {"runner":"macos-14",         "os":"darwin", "arch":"x86_64", "attr":"packages.aarch64-darwin.\"darwin-x86_64\""}
           ]
       with_windows:
-        description: |
-          Also build a windows-x86_64 artifact via pkgsCross.mingwW64 from
-          the x86_64-linux runner. The package flake must expose
-          `packages.x86_64-linux."windows-x86_64"`.
         type: boolean
         default: false
       release_tag:
-        description: |
-          When non-empty, override the auto-derived version with this tag
-          (stripping a leading `v`) and pass it to the release publish
-          step. Used by release.yml so freshly-pushed tags drive artifact
-          naming and the GitHub Release; workflow_call doesn't change
-          github.ref_type from the caller's event.
         type: string
         default: ""
     secrets:
@@ -61,18 +41,61 @@ on:
         required: true
 
 jobs:
-  matrix:
-    name: compute matrix
+  preflight:
+    name: preflight
     runs-on: ubuntu-latest
     outputs:
-      include: ${{ steps.merge.outputs.include }}
+      include: ${{ steps.matrix.outputs.include }}
+      package_name: ${{ steps.resolve.outputs.package_name }}
+      package_data: ${{ steps.resolve.outputs.package_data }}
+      bootstrap_naming: ${{ steps.resolve.outputs.bootstrap_naming }}
     steps:
-      - id: merge
-        env:
-          BASE: ${{ inputs.platforms }}
-          WIN: ${{ inputs.with_windows }}
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - id: manifest
         run: |
           set -euo pipefail
+          MANIFEST="$(nix eval --json '.#manifest' 2>/dev/null || echo '{}')"
+          echo "Manifest from flake: ${MANIFEST}"
+          echo "json=${MANIFEST}" >> "${GITHUB_OUTPUT}"
+          HAS_WIN="$(nix eval --raw --apply 'a: if a ? "windows-x86_64" then "true" else "false"' '.#packages.x86_64-linux' 2>/dev/null || echo false)"
+          echo "windows attr present: ${HAS_WIN}"
+          echo "has_windows=${HAS_WIN}" >> "${GITHUB_OUTPUT}"
+      - id: resolve
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.json }}
+          IN_NAME: ${{ inputs.package_name }}
+          IN_DATA: ${{ inputs.package_data }}
+          IN_BOOT: ${{ inputs.bootstrap_naming }}
+        run: |
+          set -euo pipefail
+          # Strings: input wins if non-empty. Booleans: input wins if true
+          # (its non-default value); else defer to manifest. Manifest itself
+          # defaults to false/empty when keys are absent.
+          NAME="${IN_NAME:-$(jq -r '.name // ""' <<<"${MANIFEST}")}"
+          if [ -z "${NAME}" ]; then
+            echo "::error::no package_name input and no .#manifest.name in caller flake"
+            exit 1
+          fi
+          DATA="${IN_DATA}"
+          if [ "${DATA}" = "false" ]; then DATA="$(jq -r '.package_data // false' <<<"${MANIFEST}")"; fi
+          BOOT="${IN_BOOT}"
+          if [ "${BOOT}" = "false" ]; then BOOT="$(jq -r '.bootstrap_naming // false' <<<"${MANIFEST}")"; fi
+          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT}"
+          echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
+          echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
+          echo "bootstrap_naming=${BOOT}" >> "${GITHUB_OUTPUT}"
+      - id: matrix
+        env:
+          BASE: ${{ inputs.platforms }}
+          IN_WIN: ${{ inputs.with_windows }}
+          HAS_WIN: ${{ steps.manifest.outputs.has_windows }}
+        run: |
+          set -euo pipefail
+          WIN="${IN_WIN}"
+          if [ "${WIN}" = "false" ]; then WIN="${HAS_WIN}"; fi
           if [ "${WIN}" = "true" ]; then
             WIN_ENTRY='{"runner":"ubuntu-latest","os":"windows","arch":"x86_64","attr":"packages.x86_64-linux.\"windows-x86_64\""}'
             INCLUDE=$(jq -cn --argjson a "${BASE}" --argjson w "${WIN_ENTRY}" '$a + [$w]')
@@ -82,13 +105,13 @@ jobs:
           echo "include=${INCLUDE}" >> "${GITHUB_OUTPUT}"
 
   build:
-    needs: matrix
+    needs: preflight
     name: build (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.matrix.outputs.include) }}
+        include: ${{ fromJSON(needs.preflight.outputs.include) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -151,7 +174,7 @@ jobs:
 
       - name: Verify binary is portable
         env:
-          PKG: ${{ inputs.package_name }}
+          PKG: ${{ needs.preflight.outputs.package_name }}
           OS: ${{ matrix.os }}
         run: |
           set -euo pipefail
@@ -212,12 +235,12 @@ jobs:
       - name: Stage artifacts
         id: stage
         env:
-          PKG: ${{ inputs.package_name }}
+          PKG: ${{ needs.preflight.outputs.package_name }}
           VERSION: ${{ steps.ver.outputs.version }}
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
-          WANT_DATA: ${{ inputs.package_data }}
-          BOOTSTRAP: ${{ inputs.bootstrap_naming }}
+          WANT_DATA: ${{ needs.preflight.outputs.package_data }}
+          BOOTSTRAP: ${{ needs.preflight.outputs.bootstrap_naming }}
         run: |
           set -euo pipefail
           mkdir -p out
@@ -252,7 +275,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: ${{ inputs.package_name }}-${{ steps.ver.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}
+          name: ${{ needs.preflight.outputs.package_name }}-${{ steps.ver.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}
           path: out/*
           if-no-files-found: error
 

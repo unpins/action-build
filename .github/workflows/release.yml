@@ -16,9 +16,12 @@ name: release
 on:
   workflow_call:
     inputs:
+      # All inputs are optional fallbacks; preferred source is the
+      # caller flake's `manifest` attr. See build.yml for the same
+      # resolution semantics.
       package_name:
         type: string
-        required: true
+        default: ""
       package_data:
         type: boolean
         default: false
@@ -63,7 +66,7 @@ jobs:
 
       - id: compute
         env:
-          OWN: ${{ inputs.own_software }}
+          IN_OWN: ${{ inputs.own_software }}
         run: |
           set -euo pipefail
           UP="$(nix eval --raw .#default.version)"
@@ -71,6 +74,9 @@ jobs:
             echo "::error::could not resolve upstream version from .#default.version"
             exit 1
           fi
+          MANIFEST_OWN="$(nix eval --raw '.#manifest.own_software' 2>/dev/null || echo false)"
+          OWN="${IN_OWN}"
+          if [ "${OWN}" = "false" ]; then OWN="${MANIFEST_OWN}"; fi
           if [ "${OWN}" = "true" ]; then
             TAG="v${UP}"
             if [ -n "$(git tag -l "${TAG}")" ]; then
@@ -100,6 +106,8 @@ jobs:
     needs: tag
     uses: unpins/action-build/.github/workflows/build.yml@main
     with:
+      # Inputs are forwarded as-is; build.yml's preflight resolves them
+      # against the manifest. Empty values defer to manifest entirely.
       package_name: ${{ inputs.package_name }}
       package_data: ${{ inputs.package_data }}
       bootstrap_naming: ${{ inputs.bootstrap_naming }}
