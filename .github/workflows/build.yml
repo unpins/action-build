@@ -118,7 +118,11 @@ jobs:
           set -euo pipefail
           case "${OS}" in
             linux)
-              BIN="$(readlink -f result)/bin/${PKG}"
+              # Some pkgs (bash-interactive, etc.) put the real ELF in a
+              # sub-derivation and `result/bin/<pkg>` is itself a symlink.
+              # Resolve the full chain so `file` inspects the binary, not
+              # the link descriptor.
+              BIN="$(readlink -f result/bin/${PKG})"
               info="$(file -b "${BIN}")"
               echo "${info}"
               if ! grep -q "statically linked" <<<"${info}"; then
@@ -127,7 +131,7 @@ jobs:
               fi
               ;;
             darwin)
-              BIN="$(readlink -f result)/bin/${PKG}"
+              BIN="$(readlink -f result/bin/${PKG})"
               # otool -L's first line is the inspected binary's own path
               # ("/nix/store/.../bin/${PKG}:"); skip it so the /nix/store
               # check applies only to dependency lines.
@@ -179,28 +183,27 @@ jobs:
           set -euo pipefail
           mkdir -p out
           OUT_DIR="$(readlink -f result)"
-          # Default: <pkg>-<version>-<os>-<arch>[.exe] — `unpin install` parses
-          # asset names expecting this layout.
-          # Bootstrap: <pkg>-<arch>-<os>[.exe] — stable filename for tools
-          # users download by hand (the unpin CLI from unpins.org).
-          if [ "${BOOTSTRAP}" = "true" ]; then
-            STEM="${PKG}-${ARCH}-${OS}"
-            DATA_STEM="${PKG}-data-${ARCH}-${OS}"
-          else
-            STEM="${PKG}-${VERSION}-${OS}-${ARCH}"
-            DATA_STEM="${PKG}-data-${VERSION}-${OS}-${ARCH}"
-          fi
+          EXT=""
           if [ "${OS}" = "windows" ]; then
-            BIN_NAME="${STEM}.exe"
-            cp "${OUT_DIR}/bin/${PKG}.exe" "out/${BIN_NAME}"
-          else
-            BIN_NAME="${STEM}"
-            cp "${OUT_DIR}/bin/${PKG}" "out/${BIN_NAME}"
+            EXT=".exe"
           fi
-
+          BIN_SRC="${OUT_DIR}/bin/${PKG}${EXT}"
+          # Primary artifact: <pkg>-<version>-<os>-<arch>[.exe].zst, single-file
+          # zstd (no tar wrapper) — `unpin install` parses this naming.
+          STEM_VER="${PKG}-${VERSION}-${OS}-${ARCH}"
+          nix shell nixpkgs#zstd --command \
+            zstd -19 -q -o "out/${STEM_VER}${EXT}.zst" "${BIN_SRC}"
+          # Bootstrap (currently just `unpin`): also publish a versionless raw
+          # binary so unpins.org's `/unpin-<arch>-<os>[.exe]` redirect lands on
+          # an asset present in every release via GitHub's `releases/latest`.
+          if [ "${BOOTSTRAP}" = "true" ]; then
+            STEM_BOOT="${PKG}-${ARCH}-${OS}"
+            cp "${BIN_SRC}" "out/${STEM_BOOT}${EXT}"
+          fi
+          # Data tarball (man pages, share/, etc) — version-named.
           if [ "${WANT_DATA}" = "true" ] && [ -d "${OUT_DIR}/share" ]; then
-            DATA_NAME="${DATA_STEM}.tar.zst"
-            tar --zstd -cf "out/${DATA_NAME}" -C "${OUT_DIR}" share
+            DATA_STEM="${PKG}-data-${VERSION}-${OS}-${ARCH}"
+            tar --zstd -cf "out/${DATA_STEM}.tar.zst" -C "${OUT_DIR}" share
           fi
 
           ls -lh out/
