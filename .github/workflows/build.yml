@@ -27,9 +27,16 @@ on:
         default: false
       platforms:
         description: |
-          JSON array of {runner, os, arch, attr?} objects. Defaults to all 4
-          native targets. To add cross-compiled Windows builds, add an entry
-          with os=windows and attr pointing at the cross derivation, e.g.
+          JSON array of {runner, os, arch, attr?} objects. Default covers the
+          4 native targets — note darwin-x86_64 is *cross-compiled* from the
+          aarch64-darwin runner via pkgsCross.x86_64-darwin (same single-
+          runner pattern as windows-from-linux), so the package flake must
+          expose `packages.aarch64-darwin."darwin-x86_64"`. macos-13 (Intel
+          native) is intentionally not used — increasingly scarce in the
+          free pool and slower to schedule than the cross job.
+
+          To add cross-compiled Windows builds, append an entry with
+          os=windows and attr pointing at the cross derivation, e.g.
           {"runner":"ubuntu-latest","os":"windows","arch":"x86_64",
            "attr":"packages.x86_64-linux.\"windows-x86_64\""}
           When attr is omitted the build target is .#default.
@@ -38,8 +45,8 @@ on:
           [
             {"runner":"ubuntu-latest",    "os":"linux",  "arch":"x86_64"},
             {"runner":"ubuntu-24.04-arm", "os":"linux",  "arch":"aarch64"},
-            {"runner":"macos-13",         "os":"darwin", "arch":"x86_64"},
-            {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"}
+            {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"},
+            {"runner":"macos-14",         "os":"darwin", "arch":"x86_64", "attr":"packages.aarch64-darwin.\"darwin-x86_64\""}
           ]
     secrets:
       CACHIX_AUTH_TOKEN:
