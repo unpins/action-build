@@ -249,7 +249,12 @@ jobs:
           if [ "${OS}" = "windows" ]; then
             EXT=".exe"
           fi
-          BIN_SRC="${OUT_DIR}/bin/${PKG}${EXT}"
+          # Resolve through any symlink chain. When the package is a
+          # `symlinkJoin` (e.g. nix-lib's packageWithMan for multi-output
+          # drvs like jq), `${OUT_DIR}/bin/${PKG}` is a symlink, and zstd
+          # silently ignores symlinks and exits 1 with no message. cp -L
+          # similarly needs the real file. Resolve once up front.
+          BIN_SRC="$(readlink -f "${OUT_DIR}/bin/${PKG}${EXT}")"
           # Primary artifact: <pkg>-<version>-<arch>-<os>[.exe].zst, single-file
           # zstd (no tar wrapper) — `unpin install` parses this naming.
           # arch-first matches Rust target triples and the bootstrap naming
