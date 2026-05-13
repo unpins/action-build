@@ -1,5 +1,12 @@
 name: build
 
+# actions/upload-artifact@v5 (and a few cachix actions) still ship a
+# Node 20 runtime, which the runner deprecates in mid-2026. Opt the
+# workflow into Node 24 globally so the deprecation banner stops
+# appearing and we're not surprised when the runner flips the default.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   workflow_call:
     inputs:
