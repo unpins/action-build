@@ -299,6 +299,15 @@ jobs:
             tar --zstd -cf "out/${DATA_STEM}.tar.zst" -C "${OUT_DIR}" share
           fi
 
+          # SHA-256 sidecar per artifact. `openssl dgst -r` emits the sha256sum
+          # format (`<hash>  <filename>`); openssl is pre-installed on every
+          # runner image (ubuntu-latest, ubuntu-24.04-arm, macos-14), unlike
+          # GNU coreutils' `sha256sum` which is absent on macos.
+          ( cd out && for f in *; do
+              case "$f" in *.sha256) continue ;; esac
+              openssl dgst -r -sha256 -out "${f}.sha256" "${f}"
+            done )
+
           ls -lh out/
 
       - uses: actions/upload-artifact@v7
