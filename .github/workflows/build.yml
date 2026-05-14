@@ -201,11 +201,17 @@ jobs:
               echo "${deps}"
               # Apple only guarantees ABI stability for libSystem and the
               # system frameworks; every other dylib in /usr/lib is de-facto
-              # but not contractually stable. Enforce libSystem-only so the
-              # binary stays minimal and the contract is explicit.
+              # but not contractually stable. Enforce a minimal allow-list:
+              #   - libSystem.B.dylib (the C library)
+              #   - /System/Library/Frameworks/* (versioned but stable)
+              #   - libobjc.A.dylib (ObjC runtime — required by any framework)
+              #   - libc++.1.dylib (C++ stdlib — required by any C++ framework)
+              # Reject everything else so the contract stays explicit.
               bad="$(awk '{print $1}' <<<"${deps}" \
                 | grep -Ev '^/usr/lib/libSystem\.[A-Za-z0-9.]+\.dylib$' \
                 | grep -Ev '^/System/Library/Frameworks/[^/]+\.framework/' \
+                | grep -Ev '^/usr/lib/libobjc\.[A-Za-z0-9.]+\.dylib$' \
+                | grep -Ev '^/usr/lib/libc\+\+\.[A-Za-z0-9.]+\.dylib$' \
                 || true)"
               if [ -n "${bad}" ]; then
                 echo "::error::${PKG}: darwin binary links non-system libraries:"
