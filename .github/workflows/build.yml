@@ -285,9 +285,17 @@ jobs:
             STEM_BOOT="${PKG}-${ARCH}-${OS}"
             cp "${BIN_SRC}" "out/${STEM_BOOT}${EXT}"
           fi
-          # Data tarball (man pages, share/, etc) — version-named.
-          if [ "${WANT_DATA}" = "true" ] && [ -d "${OUT_DIR}/share" ]; then
-            DATA_STEM="${PKG}-data-${VERSION}-${ARCH}-${OS}"
+          # Data tarball (man pages, runtime files, etc). One asset per
+          # release, not per platform: vim/gvim runtime is Vimscript/syntax
+          # text — identical on every target. Gate on the native Linux x86_64
+          # job to pick a single producer; the other matrix jobs ignore data
+          # and the tarball gets uploaded once. unpin pairs it with primary
+          # assets by tag in preflight (see install.rs::find_companion).
+          if [ "${WANT_DATA}" = "true" ] \
+             && [ -d "${OUT_DIR}/share" ] \
+             && [ "${OS}" = "linux" ] \
+             && [ "${ARCH}" = "x86_64" ]; then
+            DATA_STEM="${PKG}-${VERSION}-data"
             tar --zstd -cf "out/${DATA_STEM}.tar.zst" -C "${OUT_DIR}" share
           fi
 
