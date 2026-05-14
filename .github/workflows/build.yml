@@ -195,12 +195,21 @@ jobs:
             darwin)
               BIN="$(readlink -f result/bin/${PKG})"
               # otool -L's first line is the inspected binary's own path
-              # ("/nix/store/.../bin/${PKG}:"); skip it so the /nix/store
-              # check applies only to dependency lines.
+              # ("/nix/store/.../bin/${PKG}:"); skip it so the dep check
+              # applies only to dependency lines.
               deps="$(otool -L "${BIN}" | tail -n +2)"
               echo "${deps}"
-              if grep -q "/nix/store" <<<"${deps}"; then
-                echo "::error::${PKG}: Darwin binary references /nix/store paths"
+              # Apple only guarantees ABI stability for libSystem and the
+              # system frameworks; every other dylib in /usr/lib is de-facto
+              # but not contractually stable. Enforce libSystem-only so the
+              # binary stays minimal and the contract is explicit.
+              bad="$(awk '{print $1}' <<<"${deps}" \
+                | grep -Ev '^/usr/lib/libSystem\.[A-Za-z0-9.]+\.dylib$' \
+                | grep -Ev '^/System/Library/Frameworks/[^/]+\.framework/' \
+                || true)"
+              if [ -n "${bad}" ]; then
+                echo "::error::${PKG}: darwin binary links non-system libraries:"
+                printf '%s\n' "${bad}"
                 exit 1
               fi
               ;;
