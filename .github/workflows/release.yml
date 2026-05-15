@@ -28,22 +28,6 @@ on:
       bootstrap_naming:
         type: boolean
         default: false
-      platforms:
-        type: string
-        default: |
-          [
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"x86_64"},
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"i686",    "attr":"packages.x86_64-linux.\"linux-i686\""},
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"ppc64le", "attr":"packages.x86_64-linux.\"linux-ppc64le\""},
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"riscv64", "attr":"packages.x86_64-linux.\"linux-riscv64\""},
-            {"runner":"ubuntu-24.04-arm", "os":"linux",  "arch":"aarch64"},
-            {"runner":"ubuntu-24.04-arm", "os":"linux",  "arch":"armv7l",  "attr":"packages.aarch64-linux.\"linux-armv7l\""},
-            {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"},
-            {"runner":"macos-14",         "os":"darwin", "arch":"x86_64",  "attr":"packages.aarch64-darwin.\"darwin-x86_64\""}
-          ]
-      with_windows:
-        type: boolean
-        default: false
       own_software:
         type: boolean
         default: false
@@ -116,8 +100,6 @@ jobs:
       package_data: ${{ inputs.package_data }}
       bootstrap_naming: ${{ inputs.bootstrap_naming }}
       create_release: true
-      platforms: ${{ inputs.platforms }}
-      with_windows: ${{ inputs.with_windows }}
       release_tag: ${{ needs.tag.outputs.tag }}
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}

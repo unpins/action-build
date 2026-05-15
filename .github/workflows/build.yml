@@ -21,22 +21,6 @@ on:
       create_release:
         type: boolean
         default: false
-      platforms:
-        type: string
-        default: |
-          [
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"x86_64"},
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"i686",    "attr":"packages.x86_64-linux.\"linux-i686\""},
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"ppc64le", "attr":"packages.x86_64-linux.\"linux-ppc64le\""},
-            {"runner":"ubuntu-latest",    "os":"linux",  "arch":"riscv64", "attr":"packages.x86_64-linux.\"linux-riscv64\""},
-            {"runner":"ubuntu-24.04-arm", "os":"linux",  "arch":"aarch64"},
-            {"runner":"ubuntu-24.04-arm", "os":"linux",  "arch":"armv7l",  "attr":"packages.aarch64-linux.\"linux-armv7l\""},
-            {"runner":"macos-14",         "os":"darwin", "arch":"aarch64"},
-            {"runner":"macos-14",         "os":"darwin", "arch":"x86_64", "attr":"packages.aarch64-darwin.\"darwin-x86_64\""}
-          ]
-      with_windows:
-        type: boolean
-        default: false
       release_tag:
         type: string
         default: ""
@@ -64,9 +48,6 @@ jobs:
           MANIFEST="$(nix eval --json '.#manifest' 2>/dev/null || echo '{}')"
           echo "Manifest from flake: ${MANIFEST}"
           echo "json=${MANIFEST}" >> "${GITHUB_OUTPUT}"
-          HAS_WIN="$(nix eval --raw --apply 'a: if a ? "windows-x86_64" then "true" else "false"' '.#packages.x86_64-linux' 2>/dev/null || echo false)"
-          echo "windows attr present: ${HAS_WIN}"
-          echo "has_windows=${HAS_WIN}" >> "${GITHUB_OUTPUT}"
       - id: resolve
         env:
           MANIFEST: ${{ steps.manifest.outputs.json }}
@@ -92,20 +73,56 @@ jobs:
           echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
           echo "bootstrap_naming=${BOOT}" >> "${GITHUB_OUTPUT}"
       - id: matrix
-        env:
-          BASE: ${{ inputs.platforms }}
-          IN_WIN: ${{ inputs.with_windows }}
-          HAS_WIN: ${{ steps.manifest.outputs.has_windows }}
+        # Auto-discover the build matrix from the caller flake's `packages`.
+        # For each host system we have a runner for, emit one matrix entry per
+        # attr in `packages.<sys>`:
+        #   - "default"          → native job (os/arch from the host system)
+        #   - "<os>-<arch>"      → cross job (os/arch parsed from the attr name;
+        #                         e.g. linux-armv7l, windows-x86_64,
+        #                         darwin-x86_64); `attr` field is set so the
+        #                         build step can pass the full flake path.
+        # Hosts without an `attr` field default to `.#default`. Systems
+        # without a runner (e.g. x86_64-darwin) are skipped — cross to them
+        # comes via an explicit `darwin-x86_64` attr under aarch64-darwin.
         run: |
           set -euo pipefail
-          WIN="${IN_WIN}"
-          if [ "${WIN}" = "false" ]; then WIN="${HAS_WIN}"; fi
-          if [ "${WIN}" = "true" ]; then
-            WIN_ENTRY='{"runner":"ubuntu-latest","os":"windows","arch":"x86_64","attr":"packages.x86_64-linux.\"windows-x86_64\""}'
-            INCLUDE=$(jq -cn --argjson a "${BASE}" --argjson w "${WIN_ENTRY}" '$a + [$w]')
-          else
-            INCLUDE=$(jq -c . <<<"${BASE}")
-          fi
+          INCLUDE=$(nix eval --json --apply '
+            pkgs:
+              let
+                runnerMap = {
+                  "x86_64-linux" = "ubuntu-latest";
+                  "aarch64-linux" = "ubuntu-24.04-arm";
+                  "aarch64-darwin" = "macos-14";
+                };
+                nativeOsArch = {
+                  "x86_64-linux"   = { os = "linux";  arch = "x86_64";  };
+                  "aarch64-linux"  = { os = "linux";  arch = "aarch64"; };
+                  "aarch64-darwin" = { os = "darwin"; arch = "aarch64"; };
+                };
+                entriesFor = sys:
+                  if !(runnerMap ? ${sys}) then []
+                  else map (k:
+                    if k == "default" then {
+                      runner = runnerMap.${sys};
+                      os = nativeOsArch.${sys}.os;
+                      arch = nativeOsArch.${sys}.arch;
+                    }
+                    else
+                      let m = builtins.match "^([^-]+)-(.+)$" k; in
+                      if m == null then null else {
+                        runner = runnerMap.${sys};
+                        os = builtins.elemAt m 0;
+                        arch = builtins.elemAt m 1;
+                        attr = "packages." + sys + ".\"" + k + "\"";
+                      }
+                  ) (builtins.attrNames (pkgs.${sys} or {}));
+              in
+                builtins.filter (e: e != null)
+                  (builtins.concatLists
+                    (map entriesFor (builtins.attrNames pkgs)))
+          ' '.#packages')
+          echo "Discovered matrix:"
+          jq . <<<"${INCLUDE}"
           echo "include=${INCLUDE}" >> "${GITHUB_OUTPUT}"
 
   build:
