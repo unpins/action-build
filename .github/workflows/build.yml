@@ -443,26 +443,16 @@ jobs:
           SMOKE_PATTERN: ${{ needs.preflight.outputs.smoke_pattern }}
         run: |
           set -euo pipefail
-          # Strip every \r from the arg — git-bash's jq emits CRLF and
-          # the ${arg%$'\r'} pattern was somehow not matching in the
-          # runner. tr -d is unambiguous.
+          # git-bash's jq emits CRLF; `read -r` strips \n but leaves \r,
+          # so the arg passed to the .exe arrives as `--version\r` and
+          # rejects. `${arg%$'\r'}` didn't match in the runner's shell
+          # for unclear reasons — tr -d is unambiguous.
           SMOKE_ARGS=()
           while IFS= read -r arg; do
-            clean="$(printf '%s' "$arg" | tr -d '\r')"
-            SMOKE_ARGS+=("$clean")
+            SMOKE_ARGS+=("$(printf '%s' "$arg" | tr -d '\r')")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
-          # Dump exact bytes of each arg to debug git-bash → PE argv mangling.
-          echo "--- arg byte dump ---"
-          for i in "${!SMOKE_ARGS[@]}"; do
-            printf "arg[%d]=" "$i"
-            printf '%s' "${SMOKE_ARGS[$i]}" | xxd
-          done
-          echo "--- via array ---"
-          ./smoke.exe "${SMOKE_ARGS[@]}" 2>&1 | head -3 || true
-          echo "--- via literal ---"
-          ./smoke.exe --version 2>&1 | head -3 || true
-          echo "--- end debug ---"
-          OUTPUT="$(./smoke.exe "${SMOKE_ARGS[@]}" 2>&1 || true)"
+          echo "Running: smoke.exe ${SMOKE_ARGS[*]}"
+          OUTPUT="$(./smoke.exe "${SMOKE_ARGS[@]}" 2>&1)"
           echo "${OUTPUT}"
           if [ -n "${SMOKE_PATTERN}" ]; then
             if ! grep -Eq -- "${SMOKE_PATTERN}" <<<"${OUTPUT}"; then
