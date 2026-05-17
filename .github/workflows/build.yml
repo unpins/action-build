@@ -443,9 +443,13 @@ jobs:
           SMOKE_PATTERN: ${{ needs.preflight.outputs.smoke_pattern }}
         run: |
           set -euo pipefail
+          # git-bash's jq emits CRLF line endings; `read -r` strips \n but
+          # leaves \r → arg passed to .exe becomes `--version\r`, which
+          # coreutils prints back as `unrecognized option '--version\n'`.
+          # Strip the trailing \r before appending.
           SMOKE_ARGS=()
           while IFS= read -r arg; do
-            SMOKE_ARGS+=("$arg")
+            SMOKE_ARGS+=("${arg%$'\r'}")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           echo "Running: smoke.exe ${SMOKE_ARGS[*]}"
           OUTPUT="$(./smoke.exe "${SMOKE_ARGS[@]}" 2>&1)"
