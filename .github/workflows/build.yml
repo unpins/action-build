@@ -37,6 +37,11 @@ jobs:
       package_name: ${{ steps.resolve.outputs.package_name }}
       package_data: ${{ steps.resolve.outputs.package_data }}
       bootstrap_naming: ${{ steps.resolve.outputs.bootstrap_naming }}
+      # JSON array of CLI args, e.g. `["--version"]`, or "null" when the
+      # caller flake doesn't opt in. Consumed by the Smoke step in build
+      # and by the smoke_windows job.
+      smoke: ${{ steps.resolve.outputs.smoke }}
+      has_windows: ${{ steps.matrix.outputs.has_windows }}
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
@@ -68,10 +73,15 @@ jobs:
           if [ "${DATA}" = "false" ]; then DATA="$(jq -r '.package_data // false' <<<"${MANIFEST}")"; fi
           BOOT="${IN_BOOT}"
           if [ "${BOOT}" = "false" ]; then BOOT="$(jq -r '.bootstrap_naming // false' <<<"${MANIFEST}")"; fi
-          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT}"
+          # `.smoke` is null when not opted in, otherwise an array. jq emits
+          # the literal "null" or the array JSON — both round-trip cleanly
+          # into the smoke step's `if`/`fromJSON` consumers.
+          SMOKE="$(jq -c '.smoke // null' <<<"${MANIFEST}")"
+          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE}"
           echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
           echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
           echo "bootstrap_naming=${BOOT}" >> "${GITHUB_OUTPUT}"
+          echo "smoke=${SMOKE}" >> "${GITHUB_OUTPUT}"
       - id: matrix
         # Auto-discover the build matrix from the caller flake's `packages`.
         # For each host system we have a runner for, emit one matrix entry per
@@ -99,6 +109,17 @@ jobs:
                   "aarch64-linux"  = { os = "linux";  arch = "aarch64"; };
                   "aarch64-darwin" = { os = "darwin"; arch = "aarch64"; };
                 };
+                # `canSmokeNative`: true when the build runner can execute
+                # the target binary in-place. Exact ABI match for linux;
+                # darwin-x86_64 on aarch64-darwin is OK thanks to Rosetta 2.
+                # Everything else (linux-i686/armv7l/ppc64le/riscv64,
+                # windows-x86_64) is cross-only — smoke for windows-x86_64
+                # runs in the dedicated `smoke_windows` job; other crosses
+                # are not smoke-tested.
+                canSmokeNative = sys: k:
+                  if k == "default" then true
+                  else if sys == "aarch64-darwin" && k == "darwin-x86_64" then true
+                  else false;
                 entriesFor = sys:
                   if !(runnerMap ? ${sys}) then []
                   else map (k:
@@ -106,6 +127,7 @@ jobs:
                       runner = runnerMap.${sys};
                       os = nativeOsArch.${sys}.os;
                       arch = nativeOsArch.${sys}.arch;
+                      can_smoke_native = canSmokeNative sys k;
                     }
                     else
                       let m = builtins.match "^([^-]+)-(.+)$" k; in
@@ -114,6 +136,7 @@ jobs:
                         os = builtins.elemAt m 0;
                         arch = builtins.elemAt m 1;
                         attr = "packages." + sys + ".\"" + k + "\"";
+                        can_smoke_native = canSmokeNative sys k;
                       }
                   ) (builtins.attrNames (pkgs.${sys} or {}));
               in
@@ -124,6 +147,10 @@ jobs:
           echo "Discovered matrix:"
           jq . <<<"${INCLUDE}"
           echo "include=${INCLUDE}" >> "${GITHUB_OUTPUT}"
+          # `has_windows` gates the smoke_windows job. true when any
+          # matrix entry targets windows (currently only `windows-x86_64`).
+          HAS_WIN="$(jq -c 'any(.os == "windows")' <<<"${INCLUDE}")"
+          echo "has_windows=${HAS_WIN}" >> "${GITHUB_OUTPUT}"
 
   build:
     needs: preflight
@@ -268,6 +295,25 @@ jobs:
               ;;
           esac
 
+      - name: Smoke (host)
+        # Skip when caller didn't opt in to smoke (smoke == "null") OR when
+        # the build runner can't execute this target's ABI (cross-only).
+        if: needs.preflight.outputs.smoke != 'null' && matrix.can_smoke_native
+        env:
+          PKG: ${{ needs.preflight.outputs.package_name }}
+          OS: ${{ matrix.os }}
+          SMOKE_JSON: ${{ needs.preflight.outputs.smoke }}
+        run: |
+          set -euo pipefail
+          EXT=""
+          [ "${OS}" = "windows" ] && EXT=".exe"
+          BIN="$(readlink -f result/bin/${PKG}${EXT})"
+          # JSON array of args → bash array via jq -r '.[]' (one line each).
+          # mapfile preserves args with spaces; readarray is the same fn.
+          mapfile -t SMOKE_ARGS < <(jq -r '.[]' <<<"${SMOKE_JSON}")
+          echo "Running: ${BIN} ${SMOKE_ARGS[*]}"
+          "${BIN}" "${SMOKE_ARGS[@]}"
+
       - name: Stage artifacts
         id: stage
         env:
@@ -336,6 +382,47 @@ jobs:
           name: ${{ needs.preflight.outputs.package_name }}-${{ steps.ver.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}
           path: out/*
           if-no-files-found: error
+
+  # Cosmocc-built Windows .exe needs a real Windows runner to validate
+  # (wine doesn't run cosmo binaries; mingw-cross PEs would work under
+  # wine but a Windows runner covers both with one job). Build matrix
+  # runs on linux; this job downloads the artifact and executes it.
+  smoke_windows:
+    name: smoke (windows-x86_64)
+    needs: [preflight, build]
+    if: needs.preflight.outputs.has_windows == 'true' && needs.preflight.outputs.smoke != 'null'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: '*-windows-x86_64'
+      - name: Locate and decompress .exe
+        shell: bash
+        env:
+          PKG: ${{ needs.preflight.outputs.package_name }}
+        run: |
+          set -euo pipefail
+          # Artifact dir layout: dist/<pkg>-<ver>-windows-x86_64/<pkg>-<ver>-x86_64-windows.exe.zst
+          EXE_ZST="$(find dist -type f -name '*.exe.zst' | head -1)"
+          if [ -z "${EXE_ZST}" ]; then
+            echo "::error::no *.exe.zst artifact found under dist/"
+            find dist -type f
+            exit 1
+          fi
+          # choco is pre-installed on windows-2022; install zstandard for .zst.
+          choco install zstandard -y --no-progress >/dev/null
+          zstd -d "${EXE_ZST}" -o "smoke.exe"
+          ls -l smoke.exe
+      - name: Smoke
+        shell: bash
+        env:
+          SMOKE_JSON: ${{ needs.preflight.outputs.smoke }}
+        run: |
+          set -euo pipefail
+          mapfile -t SMOKE_ARGS < <(jq -r '.[]' <<<"${SMOKE_JSON}")
+          echo "Running: smoke.exe ${SMOKE_ARGS[*]}"
+          ./smoke.exe "${SMOKE_ARGS[@]}"
 
   release:
     name: release
