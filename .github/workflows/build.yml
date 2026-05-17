@@ -443,16 +443,23 @@ jobs:
           SMOKE_PATTERN: ${{ needs.preflight.outputs.smoke_pattern }}
         run: |
           set -euo pipefail
-          # git-bash's jq emits CRLF line endings; `read -r` strips \n but
-          # leaves \r → arg passed to .exe becomes `--version\r`, which
-          # coreutils prints back as `unrecognized option '--version\n'`.
-          # Strip the trailing \r before appending.
+          # Strip the trailing \r (git-bash's jq emits CRLF).
           SMOKE_ARGS=()
           while IFS= read -r arg; do
             SMOKE_ARGS+=("${arg%$'\r'}")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
-          echo "Running: smoke.exe ${SMOKE_ARGS[*]}"
-          OUTPUT="$(./smoke.exe "${SMOKE_ARGS[@]}" 2>&1)"
+          # Dump exact bytes of each arg to debug git-bash → PE argv mangling.
+          echo "--- arg byte dump ---"
+          for i in "${!SMOKE_ARGS[@]}"; do
+            printf "arg[%d]=" "$i"
+            printf '%s' "${SMOKE_ARGS[$i]}" | xxd
+          done
+          echo "--- via array ---"
+          ./smoke.exe "${SMOKE_ARGS[@]}" 2>&1 | head -3 || true
+          echo "--- via literal ---"
+          ./smoke.exe --version 2>&1 | head -3 || true
+          echo "--- end debug ---"
+          OUTPUT="$(./smoke.exe "${SMOKE_ARGS[@]}" 2>&1 || true)"
           echo "${OUTPUT}"
           if [ -n "${SMOKE_PATTERN}" ]; then
             if ! grep -Eq -- "${SMOKE_PATTERN}" <<<"${OUTPUT}"; then
