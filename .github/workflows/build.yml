@@ -308,9 +308,13 @@ jobs:
           EXT=""
           [ "${OS}" = "windows" ] && EXT=".exe"
           BIN="$(readlink -f result/bin/${PKG}${EXT})"
-          # JSON array of args → bash array via jq -r '.[]' (one line each).
-          # mapfile preserves args with spaces; readarray is the same fn.
-          mapfile -t SMOKE_ARGS < <(jq -r '.[]' <<<"${SMOKE_JSON}")
+          # macOS ships bash 3.2 — no `mapfile`/`readarray`. Use a portable
+          # while-read loop. Single-line args only (the realistic case for
+          # CLI flags like `--version`).
+          SMOKE_ARGS=()
+          while IFS= read -r arg; do
+            SMOKE_ARGS+=("$arg")
+          done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           echo "Running: ${BIN} ${SMOKE_ARGS[*]}"
           "${BIN}" "${SMOKE_ARGS[@]}"
 
@@ -390,7 +394,12 @@ jobs:
   smoke_windows:
     name: smoke (windows-x86_64)
     needs: [preflight, build]
-    if: needs.preflight.outputs.has_windows == 'true' && needs.preflight.outputs.smoke != 'null'
+    # `always() &&` makes this run even when other matrix entries failed
+    # (e.g. darwin smoke regression unrelated to the windows-x86_64
+    # artifact). If the windows-x86_64 build itself failed, the artifact
+    # is missing and the Locate step errors loud — that's the signal we
+    # want, not a silent skip.
+    if: always() && needs.preflight.outputs.has_windows == 'true' && needs.preflight.outputs.smoke != 'null'
     runs-on: windows-2022
     steps:
       - uses: actions/download-artifact@v8
@@ -420,7 +429,10 @@ jobs:
           SMOKE_JSON: ${{ needs.preflight.outputs.smoke }}
         run: |
           set -euo pipefail
-          mapfile -t SMOKE_ARGS < <(jq -r '.[]' <<<"${SMOKE_JSON}")
+          SMOKE_ARGS=()
+          while IFS= read -r arg; do
+            SMOKE_ARGS+=("$arg")
+          done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           echo "Running: smoke.exe ${SMOKE_ARGS[*]}"
           ./smoke.exe "${SMOKE_ARGS[@]}"
 
