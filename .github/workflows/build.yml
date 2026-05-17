@@ -41,6 +41,8 @@ jobs:
       # caller flake doesn't opt in. Consumed by the Smoke step in build
       # and by the smoke_windows job.
       smoke: ${{ steps.resolve.outputs.smoke }}
+      # Optional grep-E pattern that must match smoke stdout+stderr.
+      smoke_pattern: ${{ steps.resolve.outputs.smoke_pattern }}
       has_windows: ${{ steps.matrix.outputs.has_windows }}
     steps:
       - uses: actions/checkout@v6
@@ -75,13 +77,16 @@ jobs:
           if [ "${BOOT}" = "false" ]; then BOOT="$(jq -r '.bootstrap_naming // false' <<<"${MANIFEST}")"; fi
           # `.smoke` is null when not opted in, otherwise an array. jq emits
           # the literal "null" or the array JSON — both round-trip cleanly
-          # into the smoke step's `if`/`fromJSON` consumers.
+          # into the smoke step's `if`/`fromJSON` consumers. `.smoke_pattern`
+          # is a raw string (or empty when null) consumed by `grep -E`.
           SMOKE="$(jq -c '.smoke // null' <<<"${MANIFEST}")"
-          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE}"
+          SMOKE_PAT="$(jq -r '.smoke_pattern // ""' <<<"${MANIFEST}")"
+          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT}"
           echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
           echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
           echo "bootstrap_naming=${BOOT}" >> "${GITHUB_OUTPUT}"
           echo "smoke=${SMOKE}" >> "${GITHUB_OUTPUT}"
+          echo "smoke_pattern=${SMOKE_PAT}" >> "${GITHUB_OUTPUT}"
       - id: matrix
         # Auto-discover the build matrix from the caller flake's `packages`.
         # For each host system we have a runner for, emit one matrix entry per
@@ -303,6 +308,7 @@ jobs:
           PKG: ${{ needs.preflight.outputs.package_name }}
           OS: ${{ matrix.os }}
           SMOKE_JSON: ${{ needs.preflight.outputs.smoke }}
+          SMOKE_PATTERN: ${{ needs.preflight.outputs.smoke_pattern }}
         run: |
           set -euo pipefail
           EXT=""
@@ -316,7 +322,14 @@ jobs:
             SMOKE_ARGS+=("$arg")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           echo "Running: ${BIN} ${SMOKE_ARGS[*]}"
-          "${BIN}" "${SMOKE_ARGS[@]}"
+          OUTPUT="$("${BIN}" "${SMOKE_ARGS[@]}" 2>&1)"
+          echo "${OUTPUT}"
+          if [ -n "${SMOKE_PATTERN}" ]; then
+            if ! grep -Eq -- "${SMOKE_PATTERN}" <<<"${OUTPUT}"; then
+              echo "::error::smoke output did not match pattern: ${SMOKE_PATTERN}"
+              exit 1
+            fi
+          fi
 
       - name: Stage artifacts
         id: stage
@@ -427,6 +440,7 @@ jobs:
         shell: bash
         env:
           SMOKE_JSON: ${{ needs.preflight.outputs.smoke }}
+          SMOKE_PATTERN: ${{ needs.preflight.outputs.smoke_pattern }}
         run: |
           set -euo pipefail
           SMOKE_ARGS=()
@@ -434,7 +448,14 @@ jobs:
             SMOKE_ARGS+=("$arg")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           echo "Running: smoke.exe ${SMOKE_ARGS[*]}"
-          ./smoke.exe "${SMOKE_ARGS[@]}"
+          OUTPUT="$(./smoke.exe "${SMOKE_ARGS[@]}" 2>&1)"
+          echo "${OUTPUT}"
+          if [ -n "${SMOKE_PATTERN}" ]; then
+            if ! grep -Eq -- "${SMOKE_PATTERN}" <<<"${OUTPUT}"; then
+              echo "::error::smoke output did not match pattern: ${SMOKE_PATTERN}"
+              exit 1
+            fi
+          fi
 
   release:
     name: release
