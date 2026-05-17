@@ -443,10 +443,13 @@ jobs:
           SMOKE_PATTERN: ${{ needs.preflight.outputs.smoke_pattern }}
         run: |
           set -euo pipefail
-          # Strip the trailing \r (git-bash's jq emits CRLF).
+          # Strip every \r from the arg — git-bash's jq emits CRLF and
+          # the ${arg%$'\r'} pattern was somehow not matching in the
+          # runner. tr -d is unambiguous.
           SMOKE_ARGS=()
           while IFS= read -r arg; do
-            SMOKE_ARGS+=("${arg%$'\r'}")
+            clean="$(printf '%s' "$arg" | tr -d '\r')"
+            SMOKE_ARGS+=("$clean")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           # Dump exact bytes of each arg to debug git-bash → PE argv mangling.
           echo "--- arg byte dump ---"
