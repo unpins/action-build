@@ -240,7 +240,10 @@ jobs:
               BIN="$(readlink -f result/bin/${PKG})"
               info="$(file -b "${BIN}")"
               echo "${info}"
-              if ! grep -q "statically linked" <<<"${info}"; then
+              # `file` says "statically linked" for a plain static ELF and
+              # "static-pie linked" for a static PIE (Rust's default for
+              # musl static binaries). Both are fully self-contained.
+              if ! grep -qE "statically linked|static-pie linked" <<<"${info}"; then
                 echo "::error::${PKG}: Linux binary is not statically linked"
                 exit 1
               fi
