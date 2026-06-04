@@ -43,6 +43,10 @@ jobs:
       smoke: ${{ steps.resolve.outputs.smoke }}
       # Optional grep-E pattern that must match smoke stdout+stderr.
       smoke_pattern: ${{ steps.resolve.outputs.smoke_pattern }}
+      # JSON array of Apple PrivateFramework names the darwin portability
+      # check accepts for this package (per-package exception). "[]" when
+      # the caller flake doesn't opt in.
+      darwin_allow_private_frameworks: ${{ steps.resolve.outputs.darwin_allow_private_frameworks }}
       has_windows: ${{ steps.matrix.outputs.has_windows }}
     steps:
       - uses: actions/checkout@v6
@@ -81,12 +85,17 @@ jobs:
           # is a raw string (or empty when null) consumed by `grep -E`.
           SMOKE="$(jq -c '.smoke // null' <<<"${MANIFEST}")"
           SMOKE_PAT="$(jq -r '.smoke_pattern // ""' <<<"${MANIFEST}")"
-          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT}"
+          # JSON array (compact) of allowed Apple PrivateFrameworks; "[]" when
+          # the caller flake doesn't opt in. Consumed by the darwin branch of
+          # the "Verify binary is portable" step.
+          DARWIN_PF="$(jq -c '.darwin_allow_private_frameworks // []' <<<"${MANIFEST}")"
+          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT} darwin_allow_private_frameworks=${DARWIN_PF}"
           echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
           echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
           echo "bootstrap_naming=${BOOT}" >> "${GITHUB_OUTPUT}"
           echo "smoke=${SMOKE}" >> "${GITHUB_OUTPUT}"
           echo "smoke_pattern=${SMOKE_PAT}" >> "${GITHUB_OUTPUT}"
+          echo "darwin_allow_private_frameworks=${DARWIN_PF}" >> "${GITHUB_OUTPUT}"
       - id: matrix
         # Auto-discover the build matrix from the caller flake's `packages`.
         # For each host system we have a runner for, emit one matrix entry per
@@ -229,6 +238,9 @@ jobs:
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
           OS: ${{ matrix.os }}
+          # JSON array of Apple PrivateFramework names this package may link
+          # (per-package darwin exception); "[]" when not opted in.
+          DARWIN_PF: ${{ needs.preflight.outputs.darwin_allow_private_frameworks }}
         run: |
           set -euo pipefail
           case "${OS}" in
@@ -269,6 +281,15 @@ jobs:
                 | grep -Ev '^/System/Library/Frameworks/[^/]+\.framework/' \
                 | grep -Ev '^/usr/lib/libobjc\.[A-Za-z0-9.]+\.dylib$' \
                 || true)"
+              # Per-package exception: a package may declare specific Apple
+              # PrivateFrameworks (manifest.darwin_allow_private_frameworks)
+              # when an upstream macOS feature has no public-framework path.
+              # Drop those from the leftover set; everything else still fails.
+              # Names are plain framework identifiers (e.g. MediaRemote), so a
+              # ".framework/" anchor keeps the match exact.
+              for fw in $(jq -r '.[]' <<<"${DARWIN_PF:-[]}"); do
+                bad="$(grep -Ev "^/System/Library/PrivateFrameworks/${fw}\.framework/" <<<"${bad}" || true)"
+              done
               if [ -n "${bad}" ]; then
                 echo "::error::${PKG}: darwin binary links non-system libraries:"
                 printf '%s\n' "${bad}"
