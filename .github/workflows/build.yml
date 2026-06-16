@@ -521,6 +521,22 @@ jobs:
           VER="${TAG#v}"
           VER="${VER%-*}"
 
+          # Headline: reuse the README's opening sentence verbatim (it carries
+          # the upstream link) and splice the version in right after the linked
+          # name, so the release leads with the same sentence users see in the
+          # README. The opening is the first link line after the H1 — starts
+          # with "[" but not "[!" (which is a badge/image). Fall back to a
+          # generic line if the README has no such opening.
+          HEADLINE="**${PKG} ${VER}** — a single self-contained binary, built natively per platform."
+          if [ -f README.md ]; then
+            OPEN="$(grep -m1 -E '^\[[^!]' README.md || true)"
+            if [ -n "${OPEN}" ]; then
+              HEADLINE="$(printf '%s' "${OPEN}" | awk -v ver="${VER}" '
+                { i = index($0, ") "); if (i > 0) print substr($0,1,i) " " ver substr($0,i+1); else print }
+              ')"
+            fi
+          fi
+
           # Provenance: the nixpkgs base this binary was built on. It is a
           # standing fact of every release (not a discrete change, so it lives
           # here rather than in the changelog), and it lets users confirm the
@@ -542,7 +558,7 @@ jobs:
           fi
 
           {
-            echo "**${PKG} ${VER}** — a single self-contained binary, built natively per platform."
+            echo "${HEADLINE}"
             echo
             echo "Install with [unpin](https://github.com/unpins/unpin):"
             echo
