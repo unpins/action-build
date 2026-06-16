@@ -590,11 +590,25 @@ jobs:
           fi
 
           if [ -n "${SECTION}" ]; then
+            # Reflow: GitHub renders single newlines in a release body as <br>,
+            # so the CHANGELOG's ~80-col hard wraps would show as ragged breaks.
+            # Join wrapped lines within each paragraph / list item into one line
+            # (keeping blank-line separators, headings, list-item starts, and
+            # fenced code blocks verbatim) so the body renders like prose.
             {
               echo
               echo "## Changes"
               echo
-              echo "${SECTION}"
+              printf '%s\n' "${SECTION}" | awk '
+                function flush(){ if (buf != "") { print buf; buf="" } }
+                /^```/        { flush(); code = !code; print; next }
+                code          { print; next }
+                /^[[:space:]]*$/ { flush(); print ""; next }
+                /^#/          { flush(); print; next }
+                /^[-*] /      { flush(); buf = $0; next }
+                { line = $0; sub(/^[[:space:]]+/, "", line); buf = (buf == "" ? line : buf " " line) }
+                END { flush() }
+              '
             } >> body.md
             echo "generate=false" >> "${GITHUB_OUTPUT}"
           else
