@@ -550,8 +550,16 @@ jobs:
             REF="$(jq -r '.nodes.nixpkgs.original.ref // empty' flake.lock 2>/dev/null || true)"
             REV="$(jq -r '.nodes.nixpkgs.locked.rev // empty' flake.lock 2>/dev/null || true)"
             EPOCH="$(jq -r '.nodes.nixpkgs.locked.lastModified // empty' flake.lock 2>/dev/null || true)"
+            OWNER="$(jq -r '.nodes.nixpkgs.original.owner // empty' flake.lock 2>/dev/null || true)"
+            REPO="$(jq -r '.nodes.nixpkgs.original.repo // empty' flake.lock 2>/dev/null || true)"
             if [ -n "${REF}" ] && [ -n "${REV}" ] && [ -n "${EPOCH}" ]; then
-              NIXPKGS_LINE="Built on nixpkgs **${REF}** (\`${REV:0:7}\`, $(date -u -d "@${EPOCH}" +%Y-%m-%d))."
+              # Link the channel label to its branch when owner/repo are known.
+              if [ -n "${OWNER}" ] && [ -n "${REPO}" ]; then
+                LABEL="[${REF}](https://github.com/${OWNER}/${REPO}/tree/${REF})"
+              else
+                LABEL="${REF}"
+              fi
+              NIXPKGS_LINE="Built on nixpkgs ${LABEL} (\`${REV:0:7}\`, $(date -u -d "@${EPOCH}" +%Y-%m-%d))."
             elif [ -n "${REV}" ] && [ -n "${EPOCH}" ]; then
               NIXPKGS_LINE="Built on nixpkgs \`${REV:0:7}\` ($(date -u -d "@${EPOCH}" +%Y-%m-%d))."
             fi
