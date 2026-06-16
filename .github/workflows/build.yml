@@ -488,11 +488,15 @@ jobs:
   release:
     name: release
     if: inputs.create_release
-    needs: build
+    needs: [preflight, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag }}
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -500,8 +504,88 @@ jobs:
 
       - run: ls -lh dist/
 
+      # Compose the release body from CHANGELOG.md (the user-facing,
+      # curated record) plus a generic header. The release.yml tag job
+      # has already promoted `[Unreleased]` to a `## [<tag>]` section, so
+      # we extract that section. Tolerant of absence: a repo with no
+      # CHANGELOG.md (or no matching section) falls back to GitHub's
+      # auto-generated commit notes, so this is safe to run for every
+      # package whether or not it has adopted a changelog yet.
+      - id: notes
+        env:
+          PKG: ${{ needs.preflight.outputs.package_name }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          # Display version: strip leading "v" and a trailing "-<pkgrel>".
+          VER="${TAG#v}"
+          VER="${VER%-*}"
+
+          # Provenance: the nixpkgs base this binary was built on. It is a
+          # standing fact of every release (not a discrete change, so it lives
+          # here rather than in the changelog), and it lets users confirm the
+          # toolchain base is current, not a deprecated channel. The consumer
+          # flake follows nix-lib's single nixpkgs pin, so the `nixpkgs` lock
+          # node is that base. Lead with the channel label (e.g. nixos-26.05) —
+          # the currency signal the user reads — and keep the exact rev + date
+          # in parentheses. Best-effort; omitted if nixpkgs isn't resolvable.
+          NIXPKGS_LINE=""
+          if [ -f flake.lock ]; then
+            REF="$(jq -r '.nodes.nixpkgs.original.ref // empty' flake.lock 2>/dev/null || true)"
+            REV="$(jq -r '.nodes.nixpkgs.locked.rev // empty' flake.lock 2>/dev/null || true)"
+            EPOCH="$(jq -r '.nodes.nixpkgs.locked.lastModified // empty' flake.lock 2>/dev/null || true)"
+            if [ -n "${REF}" ] && [ -n "${REV}" ] && [ -n "${EPOCH}" ]; then
+              NIXPKGS_LINE="Built on nixpkgs **${REF}** (\`${REV:0:7}\`, $(date -u -d "@${EPOCH}" +%Y-%m-%d))."
+            elif [ -n "${REV}" ] && [ -n "${EPOCH}" ]; then
+              NIXPKGS_LINE="Built on nixpkgs \`${REV:0:7}\` ($(date -u -d "@${EPOCH}" +%Y-%m-%d))."
+            fi
+          fi
+
+          {
+            echo "**${PKG} ${VER}** — a single self-contained binary, built natively per platform."
+            echo
+            echo "Install with [unpin](https://github.com/unpins/unpin):"
+            echo
+            echo '```'
+            echo "unpin install ${PKG}"
+            echo '```'
+            echo
+            echo "Standalone binaries for manual download are attached below."
+            if [ -n "${NIXPKGS_LINE}" ]; then echo; echo "${NIXPKGS_LINE}"; fi
+          } > body.md
+
+          SECTION=""
+          if [ -f CHANGELOG.md ]; then
+            # Pull the lines under "## [<tag>]" up to the next "## " heading.
+            # Match the heading by prefix: it is "## [<tag>] - <date>".
+            SECTION="$(awk -v prefix="## [${TAG}]" '
+              index($0, prefix) == 1 { grab=1; next }
+              grab && /^## / { exit }
+              grab { print }
+            ' CHANGELOG.md | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba}')"
+          fi
+
+          if [ -n "${SECTION}" ]; then
+            {
+              echo
+              echo "## Changes"
+              echo
+              echo "${SECTION}"
+            } >> body.md
+            echo "generate=false" >> "${GITHUB_OUTPUT}"
+          else
+            # No curated changelog section — let GitHub append the commit
+            # list so the release still says something.
+            echo "generate=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "----- release body -----"
+          cat body.md
+
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.release_tag }}
+          body_path: body.md
+          generate_release_notes: ${{ steps.notes.outputs.generate == 'true' }}
           files: dist/*
           fail_on_unmatched_files: true

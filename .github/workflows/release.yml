@@ -87,6 +87,26 @@ jobs:
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Promote the changelog's rolling `## [Unreleased]` section to a
+          # `## [<tag>] - <date>` heading and commit it back to main, so the
+          # tag we cut includes the stamped changelog and the release job can
+          # extract that section for the release body. Skipped (no-op) for
+          # repos that haven't adopted a CHANGELOG.md yet.
+          if [ -f CHANGELOG.md ] && grep -q '^## \[Unreleased\]' CHANGELOG.md; then
+            DATE="$(date +%Y-%m-%d)"
+            awk -v hdr="## [${TAG}] - ${DATE}" '
+              !done && /^## \[Unreleased\]/ { print; print ""; print hdr; done=1; next }
+              { print }
+            ' CHANGELOG.md > CHANGELOG.md.new
+            mv CHANGELOG.md.new CHANGELOG.md
+            if ! git diff --quiet CHANGELOG.md; then
+              git add CHANGELOG.md
+              git commit -m "Changelog: release ${TAG}"
+              git push origin HEAD:main
+            fi
+          fi
+
           git tag -a "${TAG}" -m "release ${TAG}"
           git push origin "${TAG}"
 
