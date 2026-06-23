@@ -48,6 +48,7 @@ jobs:
       # the caller flake doesn't opt in.
       darwin_allow_private_frameworks: ${{ steps.resolve.outputs.darwin_allow_private_frameworks }}
       has_windows: ${{ steps.matrix.outputs.has_windows }}
+      hosts: ${{ steps.matrix.outputs.hosts }}
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
@@ -139,6 +140,7 @@ jobs:
                   else map (k:
                     if k == "default" then {
                       runner = runnerMap.${sys};
+                      sys = sys;
                       os = nativeOsArch.${sys}.os;
                       arch = nativeOsArch.${sys}.arch;
                       can_smoke_native = canSmokeNative sys k;
@@ -147,6 +149,7 @@ jobs:
                       let m = builtins.match "^([^-]+)-(.+)$" k; in
                       if m == null then null else {
                         runner = runnerMap.${sys};
+                        sys = sys;
                         os = builtins.elemAt m 0;
                         arch = builtins.elemAt m 1;
                         attr = "packages." + sys + ".\"" + k + "\"";
@@ -165,9 +168,63 @@ jobs:
           # matrix entry targets windows (currently only `windows-x86_64`).
           HAS_WIN="$(jq -c 'any(.os == "windows")' <<<"${INCLUDE}")"
           echo "has_windows=${HAS_WIN}" >> "${GITHUB_OUTPUT}"
+          # Distinct build hosts, for the warm-toolchain job. One engine
+          # toolchain is built per host and shared by that host's native build
+          # and every cross it emits, so warming once per host (not per target)
+          # is enough to spare every fan-out job the rebuild.
+          HOSTS="$(jq -c '[.[] | {runner, sys}] | unique' <<<"${INCLUDE}")"
+          echo "Distinct hosts: ${HOSTS}"
+          echo "hosts=${HOSTS}" >> "${GITHUB_OUTPUT}"
+
+  # Build the unpin-llvm engine toolchain once per host and push it to cachix,
+  # so the fan-out `build` jobs substitute it instead of each rebuilding the
+  # same ~1-2h LLVM compile (one toolchain serves a host's native build and
+  # every cross it emits). A no-op for packages that don't use the engine.
+  warm:
+    needs: preflight
+    name: warm (${{ matrix.sys }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preflight.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v17
+        with:
+          name: unpins
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build engine toolchain
+        env:
+          SYS: ${{ matrix.sys }}
+        run: |
+          set -euo pipefail
+          # The toolchain is in the native default's dependency closure; the
+          # `unpin-llvm-static-*` naming is stable. Realize only those drvs
+          # (cachix-action's post step pushes them). Empty match → engine not
+          # in use → nothing to do.
+          DRV="$(nix path-info --derivation ".#packages.${SYS}.default")"
+          TC="$(nix-store -q --requisites "${DRV}" \
+            | grep -E '/nix/store/[a-z0-9]+-unpin-llvm-static-.*\.drv$' \
+            | sort -u || true)"
+          if [ -z "${TC}" ]; then
+            echo "No engine toolchain in closure — nothing to warm."
+            exit 0
+          fi
+          echo "Warming:"; printf '%s\n' "${TC}"
+          # shellcheck disable=SC2086
+          nix-store -r ${TC} --print-build-logs
 
   build:
-    needs: preflight
+    # `warm` is a pure cache-population optimization: depend on it so build
+    # starts after the toolchain is in cachix, but `always()` keeps build
+    # running even if warm fails/skips (build then just rebuilds the
+    # toolchain itself). Guard on preflight so build still needs the matrix.
+    needs: [preflight, warm]
+    if: ${{ always() && needs.preflight.result == 'success' }}
     name: build (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
