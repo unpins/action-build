@@ -215,8 +215,11 @@ jobs:
             exit 0
           fi
           echo "Warming:"; printf '%s\n' "${TC}"
-          # shellcheck disable=SC2086
-          nix-store -r ${TC} --print-build-logs
+          # `nix build <drv>^*` realizes all outputs (nix-store -r has no
+          # --print-build-logs); cachix-action's post step pushes them.
+          for d in ${TC}; do
+            nix build "${d}^*" --no-link --print-build-logs
+          done
 
   build:
     # `warm` is a pure cache-population optimization: depend on it so build
