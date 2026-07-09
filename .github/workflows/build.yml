@@ -287,23 +287,38 @@ jobs:
       # package. For a big all-targets package the ld.lld peak exceeds the 16 GB
       # runner RAM and the linker is OOM-killed: binutils (--enable-targets=all
       # folds libbfd + ld/as/gold with every target's emulation) measured a
-      # ~19.5 GB peak, so all six linux arches OOM'd. A swapfile absorbs the
+      # ~19.5 GB peak, so all six linux arches OOM'd. Extra swap absorbs the
       # few-GB overshoot with negligible thrashing, keeping the link at full
       # -O2 LTO (byte-identical to a well-resourced build). Inert for packages
-      # whose link fits in RAM — the swap is provisioned but never touched. The
-      # temp disk (/mnt on the Azure runner images, both x86 and arm) has room;
-      # fall back to / and to dd where fallocate is unsupported.
+      # whose link fits in RAM — the swap is provisioned but never touched.
+      #
+      # Best-effort by design (continue-on-error): a cushion, never a gate.
+      # GitHub already mounts a small ACTIVE /mnt/swapfile AND relocates the nix
+      # store onto whichever disk is bigger, so we must NOT reuse that path or
+      # assume /mnt is roomy (on current images /mnt is the small disk and / is
+      # large — a fixed 24 G write to /mnt filled it and failed the step, which
+      # broke every x86_64 build). So: add a SEPARATE file, on whichever of //mnt
+      # has the most free space, sized to leave generous headroom, capped at 16 G;
+      # skip cleanly if neither disk can spare it.
       - name: Add swap for large LTO fold links
         if: runner.os == 'Linux'
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          SWAP=/mnt/swapfile; [ -d /mnt ] || SWAP=/swapfile
-          sudo fallocate -l 24G "$SWAP" 2>/dev/null \
-            || sudo dd if=/dev/zero of="$SWAP" bs=1M count=24576 status=none
+          set -uo pipefail
+          pick_free() { df -P -BG "$1" 2>/dev/null | awk 'NR==2{gsub(/[A-Za-z]/,"",$4); print $4+0}'; }
+          DIR=/; FREE=$(pick_free /)
+          MNT_FREE=$(pick_free /mnt); [ "${MNT_FREE:-0}" -gt "${FREE:-0}" ] && { DIR=/mnt; FREE=$MNT_FREE; }
+          SIZE=$(( ${FREE:-0} - 10 )); [ "$SIZE" -gt 16 ] && SIZE=16
+          if [ "${SIZE:-0}" -lt 4 ]; then echo "skip extra swap: only ${FREE}G free on ${DIR}"; exit 0; fi
+          SWAP="${DIR%/}/unpin-lto-swap"
+          sudo swapoff "$SWAP" 2>/dev/null || true; sudo rm -f "$SWAP"
+          sudo fallocate -l ${SIZE}G "$SWAP" 2>/dev/null \
+            || sudo dd if=/dev/zero of="$SWAP" bs=1M count=$((SIZE*1024)) status=none \
+            || { echo "swap alloc failed; skipping"; sudo rm -f "$SWAP"; exit 0; }
           sudo chmod 600 "$SWAP"
-          sudo mkswap "$SWAP" >/dev/null
-          sudo swapon "$SWAP"
-          free -h
+          sudo mkswap "$SWAP" >/dev/null && sudo swapon "$SWAP" \
+            && echo "added ${SIZE}G swap at ${SWAP}" || echo "mkswap/swapon failed; skipping"
+          swapon --show || true; free -h || true
 
       - name: nix build
         env:
