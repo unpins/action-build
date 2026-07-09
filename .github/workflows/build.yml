@@ -283,6 +283,28 @@ jobs:
           fi
           echo "Tag v${TAG_VERSION} matches upstream ${UPSTREAM_FROM_NIX} (pkgrel ${PKGREL})"
 
+      # The engine multicall self-fold codegens ONE whole-program LTO module per
+      # package. For a big all-targets package the ld.lld peak exceeds the 16 GB
+      # runner RAM and the linker is OOM-killed: binutils (--enable-targets=all
+      # folds libbfd + ld/as/gold with every target's emulation) measured a
+      # ~19.5 GB peak, so all six linux arches OOM'd. A swapfile absorbs the
+      # few-GB overshoot with negligible thrashing, keeping the link at full
+      # -O2 LTO (byte-identical to a well-resourced build). Inert for packages
+      # whose link fits in RAM — the swap is provisioned but never touched. The
+      # temp disk (/mnt on the Azure runner images, both x86 and arm) has room;
+      # fall back to / and to dd where fallocate is unsupported.
+      - name: Add swap for large LTO fold links
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          SWAP=/mnt/swapfile; [ -d /mnt ] || SWAP=/swapfile
+          sudo fallocate -l 24G "$SWAP" 2>/dev/null \
+            || sudo dd if=/dev/zero of="$SWAP" bs=1M count=24576 status=none
+          sudo chmod 600 "$SWAP"
+          sudo mkswap "$SWAP" >/dev/null
+          sudo swapon "$SWAP"
+          free -h
+
       - name: nix build
         env:
           ATTR: ${{ matrix.attr }}
