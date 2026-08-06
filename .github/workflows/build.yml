@@ -452,6 +452,119 @@ jobs:
             fi
           fi
 
+      - name: Smoke applets (host)
+        # The build asserts that the announced applet list equals the embedded
+        # one. It cannot say a name still *reaches* a program in the shipped
+        # binary: one that resolves to nothing falls through to the dispatcher's
+        # listing — or, where a defaultApplet exists, silently runs that program
+        # instead — and exits 0 either way. So exercise every announced name.
+        if: matrix.can_smoke_native
+        env:
+          PKG: ${{ needs.preflight.outputs.package_name }}
+        run: |
+          set -euo pipefail
+          BIN="$(readlink -f "result/bin/${PKG}")"
+          # A missing unzip would turn every package into a silent no-op —
+          # exactly the outcome this step exists to prevent.
+          command -v unzip >/dev/null 2>&1 || {
+            echo "::error::unzip not found; cannot read the applet list"
+            exit 1
+          }
+          # What the binary announces to the world. It never includes the primary
+          # name and has no trailing newline. May be absent: a bespoke
+          # windowsBuild that packs no list of its own announces nothing, and so
+          # does a genuine single-program package.
+          ALIASES="$(unzip -p "${BIN}" unpin/aliases 2>/dev/null || true)"
+
+          LIMIT=20
+          # macOS has no `timeout`. alarm(2) is not reset by exec, so this
+          # bounds the child on every runner; SIGALRM surfaces as rc 142.
+          # </dev/null so a tool that doesn't know --help reads EOF instead of
+          # blocking until the job times out.
+          run() { perl -e 'alarm shift; exec @ARGV' "${LIMIT}" "$@" </dev/null 2>&1; }
+          # Prove the wrapper before trusting its exit codes — a missing perl
+          # would otherwise report every applet as a timeout.
+          run true >/dev/null || {
+            echo "::error::the alarm wrapper does not run here (perl missing?)"
+            exit 1
+          }
+
+          # The dispatcher's own output, verbatim from nix-lib. Seeing it means
+          # the name never reached a program. Compared as literal prefixes, not
+          # patterns — a package name may carry regex metacharacters.
+          LIST_HEAD="${PKG} is one binary with several programs:"
+          NOSELECT="${PKG}: select a program with --unpin-program="
+
+          fails=0
+          fail() { echo "::error::$*"; fails=$((fails + 1)); }
+
+          # `--help` on the canonical name says what that name means: a suite
+          # lists its table, a package whose name is itself a program prints that
+          # program's help. (Bare lists too, but it would also run a
+          # single-program primary with no arguments — gzip and friends then
+          # compress stdin to stdout.) The listing is the dispatcher's own view
+          # of its table, so it is both the name set to sweep and the thing the
+          # announced list has to agree with — the build-time guard only compares
+          # announced against embedded, never against what actually dispatches.
+          HELP="$(run "${BIN}" --help || true)"
+          if [ "${HELP#"${LIST_HEAD}"}" != "${HELP}" ]; then
+            NAMES="$(head -1 <<<"${HELP}" | sed "s/^${LIST_HEAD} //; s/, /\n/g")"
+            if [ -z "${ALIASES}" ]; then
+              echo "::warning::the binary announces no applet list; sweeping the $(grep -c . <<<"${NAMES}") names the dispatcher lists"
+            elif [ "$(sort <<<"${NAMES}")" != "$(sort <<<"${ALIASES}")" ]; then
+              fail "the dispatcher lists [$(tr '\n' ' ' <<<"${NAMES}")] but the payload announces [$(tr '\n' ' ' <<<"${ALIASES}")]"
+            fi
+          elif [ -z "${ALIASES}" ]; then
+            # Nothing lists and nothing is announced: a single-program package,
+            # where the ordinary smoke is the whole check.
+            echo "no dispatcher and no applet list — single-program package, nothing to sweep"
+            exit 0
+          else
+            # No listing: the primary name is one of the programs, sweep it too.
+            NAMES="$(printf '%s\n%s' "${PKG}" "${ALIASES}")"
+          fi
+
+          WORK="$(mktemp -d)"
+          checked=0
+          while IFS= read -r a || [ -n "${a}" ]; do
+            [ -n "${a}" ] || continue
+            checked=$((checked + 1))
+
+            # 1. Table membership, read from the one path that answers
+            #    honestly: an unknown name is always reported here, even for a
+            #    package whose defaultApplet would swallow it on the argv[0]
+            #    path below.
+            SEL="$(run "${BIN}" "--unpin-program=${a}" --help || true)"
+            case "${SEL}" in
+              "${PKG}: no program '${a}'"*)
+                fail "${a}: announced but not in the dispatch table"; continue ;;
+            esac
+
+            # 2. argv[0] resolution, which is what a symlink or a renamed copy
+            #    actually goes through.
+            ln -sf "${BIN}" "${WORK}/${a}"
+            set +e
+            OUT="$(run "${WORK}/${a}" --help)"; RC=$?
+            set -e
+            if [ "${RC}" -eq 142 ]; then
+              fail "${a}: --help did not return within ${LIMIT}s"; continue
+            fi
+            # 128+signo, and only the 31 standard signals — a plain exit(255)
+            # is a legitimate status (mtools' mzip refuses that way when the
+            # host has no SCSI).
+            if [ "${RC}" -ge 128 ] && [ "${RC}" -le 159 ]; then
+              fail "${a}: killed by signal (rc=${RC})"; continue
+            fi
+            FIRST="$(head -1 <<<"${OUT}")"
+            if [ "${FIRST#"${LIST_HEAD}"}" != "${FIRST}" ] || [ "${FIRST#"${NOSELECT}"}" != "${FIRST}" ]; then
+              fail "${a}: argv[0] did not dispatch — got the dispatcher instead of a program"
+              continue
+            fi
+            echo "ok      ${a}"
+          done <<<"${NAMES}"
+          echo "applets checked=${checked} failures=${fails}"
+          [ "${fails}" -eq 0 ]
+
       - name: Stage artifacts
         id: stage
         env:
@@ -581,6 +694,107 @@ jobs:
               exit 1
             fi
           fi
+      - name: Extract applet list
+        # git-bash carries no unzip, so read the embedded payload with .NET.
+        # ZipFile locates the central directory from the end of the file, so
+        # it reads a PE with an appended ZIP fine (verified on Windows 10 /
+        # PowerShell 5.1 as well as the runner's pwsh). No entry = a
+        # single-program package; the file is then empty and the sweep below
+        # skips out.
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $text = ''
+          try {
+            $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'smoke.exe').Path)
+            $entry = $zip.Entries | Where-Object { $_.FullName -eq 'unpin/aliases' }
+            if ($entry) {
+              $sr = New-Object IO.StreamReader($entry.Open())
+              $text = $sr.ReadToEnd()
+              $sr.Close()
+            }
+            $zip.Dispose()
+          } catch {
+            Write-Host "no zip payload readable: $_"
+          }
+          [IO.File]::WriteAllText('applets.txt', $text)
+      - name: Smoke applets
+        # Same sweep as the host job. Windows dispatches on the executable's
+        # own name, and the artifact was decompressed to smoke.exe — a name
+        # that matches no applet — so each name needs its own copy, or the run
+        # only ever exercises the fallback.
+        shell: bash
+        env:
+          PKG: ${{ needs.preflight.outputs.package_name }}
+        run: |
+          set -euo pipefail
+          ALIASES="$(tr -d '\r' < applets.txt)"
+
+          LIMIT=20
+          run() { perl -e 'alarm shift; exec @ARGV' "${LIMIT}" "$@" </dev/null 2>&1; }
+          # Prove the wrapper before trusting its exit codes — a missing perl
+          # would otherwise report every applet as a timeout.
+          run true >/dev/null || {
+            echo "::error::the alarm wrapper does not run here (perl missing?)"
+            exit 1
+          }
+
+          LIST_HEAD="${PKG} is one binary with several programs:"
+          NOSELECT="${PKG}: select a program with --unpin-program="
+
+          fails=0
+          fail() { echo "::error::$*"; fails=$((fails + 1)); }
+
+          # As on the host: the dispatcher's listing is both the name set and the
+          # thing the announced list has to agree with. A bespoke windowsBuild
+          # that packs no list of its own announces nothing — sweep it from the
+          # listing rather than mistaking it for a single-program package.
+          HELP="$(run ./smoke.exe --help || true)"
+          if [ "${HELP#"${LIST_HEAD}"}" != "${HELP}" ]; then
+            NAMES="$(head -1 <<<"${HELP}" | tr -d '\r' | sed "s/^${LIST_HEAD} //; s/, /\n/g")"
+            if [ -z "${ALIASES}" ]; then
+              echo "::warning::the binary announces no applet list; sweeping the $(grep -c . <<<"${NAMES}") names the dispatcher lists"
+            elif [ "$(sort <<<"${NAMES}")" != "$(sort <<<"${ALIASES}")" ]; then
+              fail "the dispatcher lists [$(tr '\n' ' ' <<<"${NAMES}")] but the payload announces [$(tr '\n' ' ' <<<"${ALIASES}")]"
+            fi
+          elif [ -z "${ALIASES}" ]; then
+            echo "no dispatcher and no applet list — single-program package, nothing to sweep"
+            exit 0
+          else
+            NAMES="$(printf '%s\n%s' "${PKG}" "${ALIASES}")"
+          fi
+
+          mkdir -p applets
+          checked=0
+          while IFS= read -r a || [ -n "${a}" ]; do
+            [ -n "${a}" ] || continue
+            checked=$((checked + 1))
+
+            SEL="$(run ./smoke.exe "--unpin-program=${a}" --help || true)"
+            case "$(tr -d '\r' <<<"${SEL}")" in
+              "${PKG}: no program '${a}'"*)
+                fail "${a}: announced but not in the dispatch table"; continue ;;
+            esac
+
+            cp smoke.exe "applets/${a}.exe"
+            set +e
+            OUT="$(run "./applets/${a}.exe" --help)"; RC=$?
+            set -e
+            if [ "${RC}" -eq 142 ]; then
+              fail "${a}: --help did not return within ${LIMIT}s"; continue
+            fi
+            if [ "${RC}" -ge 128 ] && [ "${RC}" -le 159 ]; then
+              fail "${a}: killed by signal (rc=${RC})"; continue
+            fi
+            FIRST="$(head -1 <<<"${OUT}" | tr -d '\r')"
+            if [ "${FIRST#"${LIST_HEAD}"}" != "${FIRST}" ] || [ "${FIRST#"${NOSELECT}"}" != "${FIRST}" ]; then
+              fail "${a}: argv[0] did not dispatch — got the dispatcher instead of a program"
+              continue
+            fi
+            echo "ok      ${a}"
+          done <<<"${NAMES}"
+          echo "applets checked=${checked} failures=${fails}"
+          [ "${fails}" -eq 0 ]
 
   release:
     name: release
