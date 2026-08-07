@@ -329,6 +329,7 @@ jobs:
           swapon --show || true; free -h || true
 
       - name: nix build
+        id: build
         env:
           ATTR: ${{ matrix.attr }}
         run: |
@@ -585,6 +586,15 @@ jobs:
 
       - name: Stage artifacts
         id: stage
+        # Stage whenever a binary exists, even if a smoke step above failed —
+        # the job still fails, but the artifact is there to inspect. Without
+        # this, the one build worth debugging is the one you cannot obtain:
+        # staging runs after the smokes, cachix has no copy of a failed job's
+        # output, and a cross target's build host may be one we have no builder
+        # for (perl darwin-x86_64, 2026-08-07). Gated on the build rather than
+        # always() so a genuine build failure still skips it instead of dying
+        # here on a missing `result`.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
           VERSION: ${{ steps.ver.outputs.version }}
@@ -647,6 +657,7 @@ jobs:
           ls -lh out/
 
       - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         with:
           name: ${{ needs.preflight.outputs.package_name }}-${{ steps.ver.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}
           path: out/*
