@@ -306,8 +306,20 @@ jobs:
       # assume /mnt is roomy (on current images /mnt is the small disk and / is
       # large — a fixed 24 G write to /mnt filled it and failed the step, which
       # broke every x86_64 build). So: add a SEPARATE file, on whichever of //mnt
-      # has the most free space, sized to leave generous headroom, capped at 16 G;
+      # has the most free space, sized to leave generous headroom, capped at 32 G;
       # skip cleanly if neither disk can spare it.
+      #
+      # Why 32 and not 16 (measured 2026-08-07): binutils' armv7l fold link was
+      # still OOM-killed at the 16 G cap. Reproduced locally under a cgroup — the
+      # link needs 30.5 G of ANONYMOUS memory and completes at rc=0 in 106 min.
+      # The runner offered 15 G RAM + 18 G swap = 33 G, a 2.5 G margin before the
+      # OS, the nix daemon and the rest of the build take their share; that is why
+      # it died, not because the link is unboundedly large. The 16 G cap was the
+      # binding constraint, not the disk: `added 16G` only prints when FREE-10 > 16,
+      # so over 26 G was free. Raising it to 32 gives ~49 G total.
+      # Rejected first: `-Wl,--threads=1` on armv7l. Measured 31 G against the same
+      # 30.5 G baseline — no reduction. In full LTO the memory IS the merged LLVM
+      # module, not the linker's per-thread arenas, so thread count is not a lever.
       - name: Add swap for large LTO fold links
         if: runner.os == 'Linux'
         continue-on-error: true
@@ -316,7 +328,7 @@ jobs:
           pick_free() { df -P -BG "$1" 2>/dev/null | awk 'NR==2{gsub(/[A-Za-z]/,"",$4); print $4+0}'; }
           DIR=/; FREE=$(pick_free /)
           MNT_FREE=$(pick_free /mnt); [ "${MNT_FREE:-0}" -gt "${FREE:-0}" ] && { DIR=/mnt; FREE=$MNT_FREE; }
-          SIZE=$(( ${FREE:-0} - 10 )); [ "$SIZE" -gt 16 ] && SIZE=16
+          SIZE=$(( ${FREE:-0} - 10 )); [ "$SIZE" -gt 32 ] && SIZE=32
           if [ "${SIZE:-0}" -lt 4 ]; then echo "skip extra swap: only ${FREE}G free on ${DIR}"; exit 0; fi
           SWAP="${DIR%/}/unpin-lto-swap"
           sudo swapoff "$SWAP" 2>/dev/null || true; sudo rm -f "$SWAP"
