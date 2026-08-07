@@ -47,6 +47,10 @@ jobs:
       # check accepts for this package (per-package exception). "[]" when
       # the caller flake doesn't opt in.
       darwin_allow_private_frameworks: ${{ steps.resolve.outputs.darwin_allow_private_frameworks }}
+      # Space-separated applet names the package declares as never answering
+      # `--help` (servers that start listening on invocation). Empty when the
+      # caller flake declares none. Consumed by both applet sweeps.
+      applets_no_help: ${{ steps.resolve.outputs.applets_no_help }}
       has_windows: ${{ steps.matrix.outputs.has_windows }}
       hosts: ${{ steps.matrix.outputs.hosts }}
     steps:
@@ -90,6 +94,9 @@ jobs:
           # the caller flake doesn't opt in. Consumed by the darwin branch of
           # the "Verify binary is portable" step.
           DARWIN_PF="$(jq -c '.darwin_allow_private_frameworks // []' <<<"${MANIFEST}")"
+          # Flattened to a space-separated list: it is matched as words inside
+          # the sweep loops, and a GITHUB_OUTPUT value cannot carry newlines.
+          NOHELP="$(jq -r '(.applets_no_help // []) | join(" ")' <<<"${MANIFEST}")"
           echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT} darwin_allow_private_frameworks=${DARWIN_PF}"
           echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
           echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
@@ -97,6 +104,7 @@ jobs:
           echo "smoke=${SMOKE}" >> "${GITHUB_OUTPUT}"
           echo "smoke_pattern=${SMOKE_PAT}" >> "${GITHUB_OUTPUT}"
           echo "darwin_allow_private_frameworks=${DARWIN_PF}" >> "${GITHUB_OUTPUT}"
+          echo "applets_no_help=${NOHELP}" >> "${GITHUB_OUTPUT}"
       - id: matrix
         # Auto-discover the build matrix from the caller flake's `packages`.
         # For each host system we have a runner for, emit one matrix entry per
@@ -461,6 +469,7 @@ jobs:
         if: matrix.can_smoke_native
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
+          NO_HELP: ${{ needs.preflight.outputs.applets_no_help }}
         run: |
           set -euo pipefail
           BIN="$(readlink -f "result/bin/${PKG}")"
@@ -538,6 +547,15 @@ jobs:
             case "${SEL}" in
               "${PKG}: no program '${a}'"*)
                 fail "${a}: announced but not in the dispatch table"; continue ;;
+            esac
+
+            # A declared server applet never returns from `--help`: it prints a
+            # banner and starts listening (rtmpsrv/rtmpsuck wrote 338 MB in the
+            # 20 s before the alarm). Membership above is the whole check —
+            # running it would only measure the alarm. The name still has to be
+            # announced and still has to be in the table; only step 2 is skipped.
+            case " ${NO_HELP:-} " in
+              *" ${a} "*) echo "ok      ${a} (declared noHelp: table membership only)"; continue ;;
             esac
 
             # 2. argv[0] resolution, which is what a symlink or a renamed copy
@@ -726,6 +744,7 @@ jobs:
         shell: bash
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
+          NO_HELP: ${{ needs.preflight.outputs.applets_no_help }}
         run: |
           set -euo pipefail
           ALIASES="$(tr -d '\r' < applets.txt)"
@@ -774,6 +793,12 @@ jobs:
             case "$(tr -d '\r' <<<"${SEL}")" in
               "${PKG}: no program '${a}'"*)
                 fail "${a}: announced but not in the dispatch table"; continue ;;
+            esac
+
+            # See the host sweep: a declared server applet never returns from
+            # `--help`, so table membership above is the whole check for it.
+            case " ${NO_HELP:-} " in
+              *" ${a} "*) echo "ok      ${a} (declared noHelp: table membership only)"; continue ;;
             esac
 
             cp smoke.exe "applets/${a}.exe"
