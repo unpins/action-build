@@ -51,6 +51,10 @@ jobs:
       # `--help` (servers that start listening on invocation). Empty when the
       # caller flake declares none. Consumed by both applet sweeps.
       applets_no_help: ${{ steps.resolve.outputs.applets_no_help }}
+      # Per-target declaration the applet sweeps check the binary against:
+      # `{ "<os>-<arch>": { dispatcher, programs, announced } }`. Empty object
+      # when the caller's nix-lib predates the field.
+      applets_by_target: ${{ steps.resolve.outputs.applets_by_target }}
       has_windows: ${{ steps.matrix.outputs.has_windows }}
       hosts: ${{ steps.matrix.outputs.hosts }}
     steps:
@@ -97,6 +101,10 @@ jobs:
           # Flattened to a space-separated list: it is matched as words inside
           # the sweep loops, and a GITHUB_OUTPUT value cannot carry newlines.
           NOHELP="$(jq -r '(.applets_no_help // []) | join(" ")' <<<"${MANIFEST}")"
+          # Per-target `{dispatcher, programs, announced}`, keyed <os>-<arch>.
+          # Passed through whole; each sweep picks its own key. "{}" from an
+          # older nix-lib leaves every sweep exactly as it was.
+          BY_TARGET="$(jq -c '.applets_by_target // {}' <<<"${MANIFEST}")"
           echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT} darwin_allow_private_frameworks=${DARWIN_PF}"
           echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
           echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
@@ -105,6 +113,7 @@ jobs:
           echo "smoke_pattern=${SMOKE_PAT}" >> "${GITHUB_OUTPUT}"
           echo "darwin_allow_private_frameworks=${DARWIN_PF}" >> "${GITHUB_OUTPUT}"
           echo "applets_no_help=${NOHELP}" >> "${GITHUB_OUTPUT}"
+          echo "applets_by_target=${BY_TARGET}" >> "${GITHUB_OUTPUT}"
       - id: matrix
         # Auto-discover the build matrix from the caller flake's `packages`.
         # For each host system we have a runner for, emit one matrix entry per
@@ -483,6 +492,8 @@ jobs:
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
           NO_HELP: ${{ needs.preflight.outputs.applets_no_help }}
+          BY_TARGET: ${{ needs.preflight.outputs.applets_by_target }}
+          TARGET: ${{ matrix.os }}-${{ matrix.arch }}
         run: |
           set -euo pipefail
           BIN="$(readlink -f "result/bin/${PKG}")"
@@ -520,6 +531,58 @@ jobs:
           fails=0
           fail() { echo "::error::$*"; fails=$((fails + 1)); }
 
+          # What the flake DECLARES for this target. Absent (or "null") for a
+          # package with no `multicall`, for a bespoke build that packs its own
+          # applet list, and for any nix-lib predating the field — those keep the
+          # checks below off and the sweep as it was.
+          command -v jq >/dev/null 2>&1 || {
+            echo "::error::jq not found; cannot read the declared applet list"
+            exit 1
+          }
+          [ -n "${BY_TARGET:-}" ] || BY_TARGET='{}'
+          DECL="$(jq -c --arg k "${TARGET}" '.[$k] // null' <<<"${BY_TARGET}")"
+          echo "declared for ${TARGET}: ${DECL}"
+          DECL_DISPATCH="$(jq -r 'if . == null then "" else (.dispatcher|tostring) end' <<<"${DECL}")"
+          DECL_NPROG="$(jq -r 'if . == null then 0 else (.programs|length) end' <<<"${DECL}")"
+          DECL_ANN="$(jq -r 'if . != null and .announced != null then .announced[] else empty end' <<<"${DECL}")"
+          DECL_ANN_KNOWN="$(jq -r 'if . != null and .announced != null then "yes" else "" end' <<<"${DECL}")"
+
+          # NEGATIVE CONTROL, and the only thing here that can see a missing
+          # dispatcher. An impossible name has to come back as the dispatcher's
+          # own refusal; anything else means the selector was never parsed and
+          # fell through to a program. No build-time guard reaches this: the
+          # announced list is written from the DECLARATION, so it announces
+          # applets whether or not something dispatches them — bzip2's .exe
+          # announced four and ran bzip2's main for every one of them, with every
+          # guard green. No `--help` after the selector on purpose: if the flag
+          # does leak, that would run the program and muddy the reading.
+          PROBE="unpin-no-such-program"
+          PROBE_OUT="$(run "${BIN}" "--unpin-program=${PROBE}" || true)"
+          case "${PROBE_OUT}" in
+            "${PKG}: no program '${PROBE}'"*) HAS_DISPATCH=yes ;;
+            *) HAS_DISPATCH=no ;;
+          esac
+          echo "dispatcher probe: ${HAS_DISPATCH} (declared: ${DECL_DISPATCH:-unknown})"
+          # Only the declared direction is an error. A binary that dispatches
+          # without nix-lib folding one is normal — coreutils and fish are their
+          # own multicall, and a bespoke multicall.nix folds its own table.
+          if [ "${DECL_DISPATCH}" = "true" ] && [ "${HAS_DISPATCH}" = "no" ]; then
+            fail "declares ${DECL_NPROG} programs and folds a dispatcher, but --unpin-program= is not handled: $(head -1 <<<"${PROBE_OUT}")"
+          fi
+
+          # Announced vs declared, both directions. Two renderings of one
+          # declaration, but they travel different roads — this one out through a
+          # flake output, the other through the embed into the shipped payload —
+          # so a name lost on the way (a dangling symlink dropped in silence, a
+          # wrap that recovered the wrong list) shows up here and nowhere else.
+          if [ -n "${DECL_ANN_KNOWN}" ]; then
+            GOT="$(sort -u <<<"${ALIASES}" | sed '/^$/d')"
+            WANT="$(sort -u <<<"${DECL_ANN}" | sed '/^$/d')"
+            if [ "${GOT}" != "${WANT}" ]; then
+              fail "the payload announces [$(tr '\n' ' ' <<<"${GOT}")] but the flake declares [$(tr '\n' ' ' <<<"${WANT}")]"
+            fi
+          fi
+
           # `--help` on the canonical name says what that name means: a suite
           # lists its table, a package whose name is itself a program prints that
           # program's help. (Bare lists too, but it would also run a
@@ -538,8 +601,11 @@ jobs:
             fi
           elif [ -z "${ALIASES}" ]; then
             # Nothing lists and nothing is announced: a single-program package,
-            # where the ordinary smoke is the whole check.
+            # where the ordinary smoke is the whole check. Still honour a failure
+            # raised above — a package that DECLARES applets and announces none
+            # lands right here, and exiting 0 would bury it.
             echo "no dispatcher and no applet list — single-program package, nothing to sweep"
+            [ "${fails}" -eq 0 ] || exit 1
             exit 0
           else
             # No listing: the primary name is one of the programs, sweep it too.
@@ -768,6 +834,8 @@ jobs:
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
           NO_HELP: ${{ needs.preflight.outputs.applets_no_help }}
+          BY_TARGET: ${{ needs.preflight.outputs.applets_by_target }}
+          TARGET: windows-x86_64
         run: |
           set -euo pipefail
           ALIASES="$(tr -d '\r' < applets.txt)"
@@ -787,6 +855,42 @@ jobs:
           fails=0
           fail() { echo "::error::$*"; fails=$((fails + 1)); }
 
+          # Same three reads and two checks as the host sweep — see there for why
+          # each exists. The windows half is where the class was actually
+          # measured: `multicall.windows = true` emitted a module for the catalog
+          # mega and shipped the raw cross build, so bzip2's .exe announced four
+          # applets and dispatched none.
+          command -v jq >/dev/null 2>&1 || {
+            echo "::error::jq not found; cannot read the declared applet list"
+            exit 1
+          }
+          [ -n "${BY_TARGET:-}" ] || BY_TARGET='{}'
+          DECL="$(jq -c --arg k "${TARGET}" '.[$k] // null' <<<"${BY_TARGET}")"
+          echo "declared for ${TARGET}: ${DECL}"
+          DECL_DISPATCH="$(jq -r 'if . == null then "" else (.dispatcher|tostring) end' <<<"${DECL}")"
+          DECL_NPROG="$(jq -r 'if . == null then 0 else (.programs|length) end' <<<"${DECL}")"
+          DECL_ANN="$(jq -r 'if . != null and .announced != null then .announced[] else empty end' <<<"${DECL}")"
+          DECL_ANN_KNOWN="$(jq -r 'if . != null and .announced != null then "yes" else "" end' <<<"${DECL}")"
+
+          PROBE="unpin-no-such-program"
+          PROBE_OUT="$(tr -d '\r' <<<"$(run ./smoke.exe "--unpin-program=${PROBE}" || true)")"
+          case "${PROBE_OUT}" in
+            "${PKG}: no program '${PROBE}'"*) HAS_DISPATCH=yes ;;
+            *) HAS_DISPATCH=no ;;
+          esac
+          echo "dispatcher probe: ${HAS_DISPATCH} (declared: ${DECL_DISPATCH:-unknown})"
+          if [ "${DECL_DISPATCH}" = "true" ] && [ "${HAS_DISPATCH}" = "no" ]; then
+            fail "declares ${DECL_NPROG} programs and folds a dispatcher, but --unpin-program= is not handled: $(head -1 <<<"${PROBE_OUT}")"
+          fi
+
+          if [ -n "${DECL_ANN_KNOWN}" ]; then
+            GOT="$(sort -u <<<"${ALIASES}" | sed '/^$/d')"
+            WANT="$(sort -u <<<"${DECL_ANN}" | sed '/^$/d')"
+            if [ "${GOT}" != "${WANT}" ]; then
+              fail "the payload announces [$(tr '\n' ' ' <<<"${GOT}")] but the flake declares [$(tr '\n' ' ' <<<"${WANT}")]"
+            fi
+          fi
+
           # As on the host: the dispatcher's listing is both the name set and the
           # thing the announced list has to agree with. A bespoke windowsBuild
           # that packs no list of its own announces nothing — sweep it from the
@@ -800,7 +904,9 @@ jobs:
               fail "the dispatcher lists [$(tr '\n' ' ' <<<"${NAMES}")] but the payload announces [$(tr '\n' ' ' <<<"${ALIASES}")]"
             fi
           elif [ -z "${ALIASES}" ]; then
+            # See the host sweep: a failure raised above must survive this exit.
             echo "no dispatcher and no applet list — single-program package, nothing to sweep"
+            [ "${fails}" -eq 0 ] || exit 1
             exit 0
           else
             NAMES="$(printf '%s\n%s' "${PKG}" "${ALIASES}")"
