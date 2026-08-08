@@ -535,17 +535,26 @@ jobs:
           # package with no `multicall`, for a bespoke build that packs its own
           # applet list, and for any nix-lib predating the field — those keep the
           # checks below off and the sweep as it was.
-          command -v jq >/dev/null 2>&1 || {
-            echo "::error::jq not found; cannot read the declared applet list"
-            exit 1
-          }
-          [ -n "${BY_TARGET:-}" ] || BY_TARGET='{}'
-          DECL="$(jq -c --arg k "${TARGET}" '.[$k] // null' <<<"${BY_TARGET}")"
+          DECL=null
+          if [ -n "${BY_TARGET:-}" ] && [ "${BY_TARGET}" != "{}" ]; then
+            # Only demanded once there IS something to read, so a caller that
+            # hasn't bumped its nix-lib cannot be broken by a missing jq. Where
+            # a declaration does exist, a silent skip is the failure this whole
+            # step exists to prevent — so say so and stop.
+            command -v jq >/dev/null 2>&1 || {
+              echo "::error::jq not found; cannot read the declared applet list"
+              exit 1
+            }
+            DECL="$(jq -c --arg k "${TARGET}" '.[$k] // null' <<<"${BY_TARGET}")"
+          fi
           echo "declared for ${TARGET}: ${DECL}"
-          DECL_DISPATCH="$(jq -r 'if . == null then "" else (.dispatcher|tostring) end' <<<"${DECL}")"
-          DECL_NPROG="$(jq -r 'if . == null then 0 else (.programs|length) end' <<<"${DECL}")"
-          DECL_ANN="$(jq -r 'if . != null and .announced != null then .announced[] else empty end' <<<"${DECL}")"
-          DECL_ANN_KNOWN="$(jq -r 'if . != null and .announced != null then "yes" else "" end' <<<"${DECL}")"
+          DECL_DISPATCH=""; DECL_NPROG=0; DECL_ANN=""; DECL_ANN_KNOWN=""
+          if [ "${DECL}" != "null" ]; then
+            DECL_DISPATCH="$(jq -r '.dispatcher|tostring' <<<"${DECL}")"
+            DECL_NPROG="$(jq -r '.programs|length' <<<"${DECL}")"
+            DECL_ANN="$(jq -r 'if .announced != null then .announced[] else empty end' <<<"${DECL}")"
+            DECL_ANN_KNOWN="$(jq -r 'if .announced != null then "yes" else "" end' <<<"${DECL}")"
+          fi
 
           # NEGATIVE CONTROL, and the only thing here that can see a missing
           # dispatcher. An impossible name has to come back as the dispatcher's
@@ -860,17 +869,26 @@ jobs:
           # measured: `multicall.windows = true` emitted a module for the catalog
           # mega and shipped the raw cross build, so bzip2's .exe announced four
           # applets and dispatched none.
-          command -v jq >/dev/null 2>&1 || {
-            echo "::error::jq not found; cannot read the declared applet list"
-            exit 1
-          }
-          [ -n "${BY_TARGET:-}" ] || BY_TARGET='{}'
-          DECL="$(jq -c --arg k "${TARGET}" '.[$k] // null' <<<"${BY_TARGET}")"
+          DECL=null
+          if [ -n "${BY_TARGET:-}" ] && [ "${BY_TARGET}" != "{}" ]; then
+            # Only demanded once there IS something to read, so a caller that
+            # hasn't bumped its nix-lib cannot be broken by a missing jq. Where
+            # a declaration does exist, a silent skip is the failure this whole
+            # step exists to prevent — so say so and stop.
+            command -v jq >/dev/null 2>&1 || {
+              echo "::error::jq not found; cannot read the declared applet list"
+              exit 1
+            }
+            DECL="$(jq -c --arg k "${TARGET}" '.[$k] // null' <<<"${BY_TARGET}")"
+          fi
           echo "declared for ${TARGET}: ${DECL}"
-          DECL_DISPATCH="$(jq -r 'if . == null then "" else (.dispatcher|tostring) end' <<<"${DECL}")"
-          DECL_NPROG="$(jq -r 'if . == null then 0 else (.programs|length) end' <<<"${DECL}")"
-          DECL_ANN="$(jq -r 'if . != null and .announced != null then .announced[] else empty end' <<<"${DECL}")"
-          DECL_ANN_KNOWN="$(jq -r 'if . != null and .announced != null then "yes" else "" end' <<<"${DECL}")"
+          DECL_DISPATCH=""; DECL_NPROG=0; DECL_ANN=""; DECL_ANN_KNOWN=""
+          if [ "${DECL}" != "null" ]; then
+            DECL_DISPATCH="$(jq -r '.dispatcher|tostring' <<<"${DECL}")"
+            DECL_NPROG="$(jq -r '.programs|length' <<<"${DECL}")"
+            DECL_ANN="$(jq -r 'if .announced != null then .announced[] else empty end' <<<"${DECL}")"
+            DECL_ANN_KNOWN="$(jq -r 'if .announced != null then "yes" else "" end' <<<"${DECL}")"
+          fi
 
           PROBE="unpin-no-such-program"
           PROBE_OUT="$(tr -d '\r' <<<"$(run ./smoke.exe "--unpin-program=${PROBE}" || true)")"
