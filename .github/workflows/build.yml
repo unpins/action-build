@@ -43,6 +43,9 @@ jobs:
       smoke: ${{ steps.resolve.outputs.smoke }}
       # Optional grep-E pattern that must match smoke stdout+stderr.
       smoke_pattern: ${{ steps.resolve.outputs.smoke_pattern }}
+      # "false" when the caller declares its .exe is GUI-subsystem, which has
+      # no console and so no stdout to smoke. Gates the smoke_windows job.
+      smoke_windows: ${{ steps.resolve.outputs.smoke_windows }}
       # JSON array of Apple PrivateFramework names the darwin portability
       # check accepts for this package (per-package exception). "[]" when
       # the caller flake doesn't opt in.
@@ -94,6 +97,10 @@ jobs:
           # is a raw string (or empty when null) consumed by `grep -E`.
           SMOKE="$(jq -c '.smoke // null' <<<"${MANIFEST}")"
           SMOKE_PAT="$(jq -r '.smoke_pattern // ""' <<<"${MANIFEST}")"
+          # NOT `// true`: jq's `//` also fires on `false`, which is the only
+          # value this key is ever set to. `has` distinguishes absent (an older
+          # nix-lib — keep smoking windows) from a declared false.
+          SMOKE_WIN="$(jq -r 'if has("smoke_windows") then .smoke_windows else true end' <<<"${MANIFEST}")"
           # JSON array (compact) of allowed Apple PrivateFrameworks; "[]" when
           # the caller flake doesn't opt in. Consumed by the darwin branch of
           # the "Verify binary is portable" step.
@@ -105,12 +112,13 @@ jobs:
           # Passed through whole; each sweep picks its own key. "{}" from an
           # older nix-lib leaves every sweep exactly as it was.
           BY_TARGET="$(jq -c '.applets_by_target // {}' <<<"${MANIFEST}")"
-          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT} darwin_allow_private_frameworks=${DARWIN_PF}"
+          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT} smoke_windows=${SMOKE_WIN} darwin_allow_private_frameworks=${DARWIN_PF}"
           echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
           echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
           echo "bootstrap_naming=${BOOT}" >> "${GITHUB_OUTPUT}"
           echo "smoke=${SMOKE}" >> "${GITHUB_OUTPUT}"
           echo "smoke_pattern=${SMOKE_PAT}" >> "${GITHUB_OUTPUT}"
+          echo "smoke_windows=${SMOKE_WIN}" >> "${GITHUB_OUTPUT}"
           echo "darwin_allow_private_frameworks=${DARWIN_PF}" >> "${GITHUB_OUTPUT}"
           echo "applets_no_help=${NOHELP}" >> "${GITHUB_OUTPUT}"
           echo "applets_by_target=${BY_TARGET}" >> "${GITHUB_OUTPUT}"
@@ -473,8 +481,28 @@ jobs:
             SMOKE_ARGS+=("$arg")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           echo "Running: ${BIN} ${SMOKE_ARGS[*]}"
-          OUTPUT="$("${BIN}" "${SMOKE_ARGS[@]}" 2>&1)"
-          echo "${OUTPUT}"
+          # Same alarm wrapper as the applet sweeps below: a smoke that never
+          # returns must be a red step, not a job that burns its whole limit.
+          # (macOS has no `timeout`, hence perl.) `</dev/null` on top, so a tool
+          # that falls back to reading stdin gets EOF instead of blocking.
+          LIMIT=120
+          run() { perl -e 'alarm shift; exec @ARGV' "${LIMIT}" "$@" </dev/null 2>&1; }
+          run true >/dev/null || {
+            echo "::error::the alarm wrapper does not run here (perl missing?)"
+            exit 1
+          }
+          if OUTPUT="$(run "${BIN}" "${SMOKE_ARGS[@]}")"; then
+            echo "${OUTPUT}"
+          else
+            rc=$?
+            echo "${OUTPUT}"
+            if [ "${rc}" -eq 142 ]; then
+              echo "::error::smoke did not finish within ${LIMIT}s"
+            else
+              echo "::error::smoke exited ${rc}"
+            fi
+            exit 1
+          fi
           if [ -n "${SMOKE_PATTERN}" ]; then
             if ! grep -Eq -- "${SMOKE_PATTERN}" <<<"${OUTPUT}"; then
               echo "::error::smoke output did not match pattern: ${SMOKE_PATTERN}"
@@ -786,7 +814,28 @@ jobs:
           choco install zstandard -y --no-progress >/dev/null
           zstd -d "${EXE_ZST}" -o "smoke.exe"
           ls -l smoke.exe
+      - name: Verify the GUI-subsystem claim
+        # Only when the caller opted OUT of the windows smoke. The exception is
+        # declared in the flake, so CI's job is to prove it still holds: a
+        # console (CUI) .exe that stopped being smoked would be a silent hole,
+        # and a smoke that never runs is a binary CI never executes at all.
+        if: needs.preflight.outputs.smoke_windows == 'false'
+        shell: pwsh
+        run: |
+          $b = [IO.File]::ReadAllBytes((Resolve-Path 'smoke.exe').Path)
+          # PE: e_lfanew at 0x3c, then the 4-byte signature + 20-byte COFF
+          # header; Subsystem sits 68 bytes into the optional header.
+          $pe  = [BitConverter]::ToInt32($b, 0x3c)
+          $sub = [BitConverter]::ToUInt16($b, $pe + 24 + 68)
+          Write-Host "PE Subsystem = $sub (2 = GUI, 3 = console)"
+          if ($sub -ne 2) {
+            Write-Host "::error::smokeWindows = false, but this .exe is not GUI-subsystem ($sub) — it has a console and must be smoked"
+            exit 1
+          }
       - name: Smoke
+        # A GUI-subsystem .exe gets no console, so it can never write the stdout
+        # this greps — see the guard above.
+        if: needs.preflight.outputs.smoke_windows != 'false'
         shell: bash
         env:
           SMOKE_JSON: ${{ needs.preflight.outputs.smoke }}
@@ -802,8 +851,26 @@ jobs:
             SMOKE_ARGS+=("$(printf '%s' "$arg" | tr -d '\r')")
           done < <(jq -r '.[]' <<<"${SMOKE_JSON}")
           echo "Running: smoke.exe ${SMOKE_ARGS[*]}"
-          OUTPUT="$(./smoke.exe "${SMOKE_ARGS[@]}" 2>&1)"
-          echo "${OUTPUT}"
+          # Alarm-wrapped like the sweep below. This is the step that hung a
+          # whole job on gvim's GUI .exe before the guard above existed.
+          LIMIT=120
+          run() { perl -e 'alarm shift; exec @ARGV' "${LIMIT}" "$@" </dev/null 2>&1; }
+          run true >/dev/null || {
+            echo "::error::the alarm wrapper does not run here (perl missing?)"
+            exit 1
+          }
+          if OUTPUT="$(run ./smoke.exe "${SMOKE_ARGS[@]}")"; then
+            echo "${OUTPUT}"
+          else
+            rc=$?
+            echo "${OUTPUT}"
+            if [ "${rc}" -eq 142 ]; then
+              echo "::error::smoke did not finish within ${LIMIT}s"
+            else
+              echo "::error::smoke exited ${rc}"
+            fi
+            exit 1
+          fi
           if [ -n "${SMOKE_PATTERN}" ]; then
             if ! grep -Eq -- "${SMOKE_PATTERN}" <<<"${OUTPUT}"; then
               echo "::error::smoke output did not match pattern: ${SMOKE_PATTERN}"
@@ -839,6 +906,9 @@ jobs:
         # own name, and the artifact was decompressed to smoke.exe — a name
         # that matches no applet — so each name needs its own copy, or the run
         # only ever exercises the fallback.
+        #
+        # Runs the .exe, so it needs a console for the same reason Smoke does.
+        if: needs.preflight.outputs.smoke_windows != 'false'
         shell: bash
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
