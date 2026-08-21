@@ -645,8 +645,11 @@ jobs:
             [ "${fails}" -eq 0 ] || exit 1
             exit 0
           else
-            # No listing: the primary name is one of the programs, sweep it too.
-            NAMES="$(printf '%s\n%s' "${PKG}" "${ALIASES}")"
+            # No listing: the dispatcher ran a program instead. The payload
+            # announces the whole table, its own name included, so ALIASES is
+            # already the sweep set — `sort -u` only guards an older artifact
+            # built before nix-lib stopped subtracting the primary.
+            NAMES="$(printf '%s\n%s' "${PKG}" "${ALIASES}" | sort -u)"
           fi
 
           WORK="$(mktemp -d)"
@@ -997,7 +1000,8 @@ jobs:
             [ "${fails}" -eq 0 ] || exit 1
             exit 0
           else
-            NAMES="$(printf '%s\n%s' "${PKG}" "${ALIASES}")"
+            # See the host sweep: ALIASES already carries the primary.
+            NAMES="$(printf '%s\n%s' "${PKG}" "${ALIASES}" | sort -u)"
           fi
 
           mkdir -p applets
