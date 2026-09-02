@@ -54,6 +54,13 @@ jobs:
       # `--help` (servers that start listening on invocation). Empty when the
       # caller flake declares none. Consumed by both applet sweeps.
       applets_no_help: ${{ steps.resolve.outputs.applets_no_help }}
+      # Announced names upstream documents nowhere, waived from the sweep's
+      # demand that every announced name carry a page. Empty when the caller
+      # flake declares none. Consumed by both applet sweeps.
+      applets_no_man: ${{ steps.resolve.outputs.applets_no_man }}
+      # A single page that documents every applet (busybox.1). Empty when the
+      # caller declares none. Consumed by both applet sweeps.
+      applets_man_page: ${{ steps.resolve.outputs.applets_man_page }}
       # Per-target declaration the applet sweeps check the binary against:
       # `{ "<os>-<arch>": { dispatcher, programs, announced } }`. Empty object
       # when the caller's nix-lib predates the field.
@@ -108,6 +115,13 @@ jobs:
           # Flattened to a space-separated list: it is matched as words inside
           # the sweep loops, and a GITHUB_OUTPUT value cannot carry newlines.
           NOHELP="$(jq -r '(.applets_no_help // []) | join(" ")' <<<"${MANIFEST}")"
+          # Same shape and same reason. Absent from an older nix-lib, which
+          # leaves NO_MAN empty — the sweep then waives nothing, which is the
+          # strict end of the range, not a silent skip.
+          NOMAN="$(jq -r '(.applets_no_man // []) | join(" ")' <<<"${MANIFEST}")"
+          # `// empty` and not `// ""`: jq's alternative fires on `false` too,
+          # and an empty string here has to mean "not declared".
+          MANPAGE="$(jq -r '.applets_man_page // empty' <<<"${MANIFEST}")"
           # Per-target `{dispatcher, programs, announced}`, keyed <os>-<arch>.
           # Passed through whole; each sweep picks its own key. "{}" from an
           # older nix-lib leaves every sweep exactly as it was.
@@ -121,6 +135,8 @@ jobs:
           echo "smoke_windows=${SMOKE_WIN}" >> "${GITHUB_OUTPUT}"
           echo "darwin_allow_private_frameworks=${DARWIN_PF}" >> "${GITHUB_OUTPUT}"
           echo "applets_no_help=${NOHELP}" >> "${GITHUB_OUTPUT}"
+          echo "applets_no_man=${NOMAN}" >> "${GITHUB_OUTPUT}"
+          echo "applets_man_page=${MANPAGE}" >> "${GITHUB_OUTPUT}"
           echo "applets_by_target=${BY_TARGET}" >> "${GITHUB_OUTPUT}"
       - id: matrix
         # Auto-discover the build matrix from the caller flake's `packages`.
@@ -520,6 +536,8 @@ jobs:
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
           NO_HELP: ${{ needs.preflight.outputs.applets_no_help }}
+          NO_MAN: ${{ needs.preflight.outputs.applets_no_man }}
+          MAN_PAGE: ${{ needs.preflight.outputs.applets_man_page }}
           BY_TARGET: ${{ needs.preflight.outputs.applets_by_target }}
           TARGET: ${{ matrix.os }}-${{ matrix.arch }}
         run: |
@@ -558,6 +576,29 @@ jobs:
 
           fails=0
           fail() { echo "::error::$*"; fails=$((fails + 1)); }
+          # Announced name -> embedded page, over ${ALIASES} against ${STEMS}.
+          # Same body in both jobs, like run() and fail() above: the two differ
+          # only in how the payload is read, never in what is demanded of it.
+          check_man() {
+            echo "man stems: $(grep -c . <<<"${STEMS}") | shared page: ${MAN_PAGE:-<none>} | waived: ${NO_MAN:-<none>}"
+            local a has waived
+            # A declared shared page has to BE here, or the names it covers are
+            # undocumented and nothing below would say so.
+            if [ -n "${MAN_PAGE:-}" ] && ! grep -qxF -- "${MAN_PAGE}" <<<"${STEMS}"; then
+              fail "declares ${MAN_PAGE} as the page documenting every applet, but no such page is embedded"
+            fi
+            while IFS= read -r a || [ -n "${a}" ]; do
+              [ -n "${a}" ] || continue
+              has=no; grep -qxF -- "${a}" <<<"${STEMS}" && has=yes
+              waived=no
+              case " ${NO_MAN:-} " in *" ${a} "*) waived=yes ;; esac
+              if [ "${has}" = yes ] && [ "${waived}" = yes ]; then
+                fail "${a}: declared noMan but a man page for it IS embedded here"
+              elif [ "${has}" = no ] && [ "${waived}" = no ] && [ -z "${MAN_PAGE:-}" ]; then
+                fail "${a}: announced but carries no man page (declare noMan if upstream documents it nowhere, or manPage if one page documents them all)"
+              fi
+            done <<<"${ALIASES}"
+          }
 
           # What the flake DECLARES for this target. Absent (or "null") for a
           # package with no `multicall`, for a bespoke build that packs its own
@@ -699,6 +740,32 @@ jobs:
             fi
             echo "ok      ${a}"
           done <<<"${NAMES}"
+
+          # 3. Every announced name must carry a man page. A name the user can
+          #    run and cannot read about is a half-shipped program, and the
+          #    failure is silent: `unpin man <pkg> <name>` finds nothing and the
+          #    listing shows the name with no description. The class is real and
+          #    was found only by a hand sweep nobody will repeat — binutils' .exe
+          #    shipped all 18 pages under `x86_64-w64-mingw32-*` so NOT ONE of
+          #    its announced names resolved, dosfstools' .exe missed 7 of 10,
+          #    lz4's 2 of 3, and procps-ng shipped no `pkill.1` because upstream
+          #    left the Makefile.am line dangling. Every one of those is a page
+          #    that EXISTS on another target — which is why the check is
+          #    per-target rather than one comparison over the catalog.
+          #
+          #    `noMan` waives a name upstream documents nowhere. It is a waiver,
+          #    not a claim of absence, so a waived name that DOES carry a page
+          #    here fails too — a stale waiver is the one thing that could hide
+          #    the class above.
+          if [ -n "${ALIASES}" ]; then
+            # `/^$/d` drops the `unpin/man/` directory entry, which strips to an
+            # empty stem — the pwsh half filters it with -not EndsWith('/'), and
+            # the two halves have to agree on what a stem is.
+            STEMS="$(unzip -l "${BIN}" 2>/dev/null | awk '{ print $NF }' \
+              | sed -n 's|^unpin/man/||p' | sed 's/\.[^.]*$//' | sed '/^$/d' | sort -u)"
+            check_man
+          fi
+
           echo "applets checked=${checked} failures=${fails}"
           [ "${fails}" -eq 0 ]
 
@@ -891,6 +958,7 @@ jobs:
         run: |
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $text = ''
+          $stems = @()
           try {
             $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'smoke.exe').Path)
             $entry = $zip.Entries | Where-Object { $_.FullName -eq 'unpin/aliases' }
@@ -899,11 +967,18 @@ jobs:
               $text = $sr.ReadToEnd()
               $sr.Close()
             }
+            # Page STEMS only: the man entries are zstd with a shared dict and
+            # cannot be inflated here, but the sweep only needs their names.
+            $stems = $zip.Entries |
+              Where-Object { $_.FullName -like 'unpin/man/*' -and -not $_.FullName.EndsWith('/') } |
+              ForEach-Object { $n = $_.FullName.Substring(10); $n -replace '\.[^.]*$','' } |
+              Sort-Object -Unique
             $zip.Dispose()
           } catch {
             Write-Host "no zip payload readable: $_"
           }
           [IO.File]::WriteAllText('applets.txt', $text)
+          [IO.File]::WriteAllLines('manstems.txt', [string[]]$stems)
       - name: Smoke applets
         # Same sweep as the host job. Windows dispatches on the executable's
         # own name, and the artifact was decompressed to smoke.exe — a name
@@ -916,6 +991,8 @@ jobs:
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
           NO_HELP: ${{ needs.preflight.outputs.applets_no_help }}
+          NO_MAN: ${{ needs.preflight.outputs.applets_no_man }}
+          MAN_PAGE: ${{ needs.preflight.outputs.applets_man_page }}
           BY_TARGET: ${{ needs.preflight.outputs.applets_by_target }}
           TARGET: windows-x86_64
         run: |
@@ -936,6 +1013,29 @@ jobs:
 
           fails=0
           fail() { echo "::error::$*"; fails=$((fails + 1)); }
+          # Announced name -> embedded page, over ${ALIASES} against ${STEMS}.
+          # Same body in both jobs, like run() and fail() above: the two differ
+          # only in how the payload is read, never in what is demanded of it.
+          check_man() {
+            echo "man stems: $(grep -c . <<<"${STEMS}") | shared page: ${MAN_PAGE:-<none>} | waived: ${NO_MAN:-<none>}"
+            local a has waived
+            # A declared shared page has to BE here, or the names it covers are
+            # undocumented and nothing below would say so.
+            if [ -n "${MAN_PAGE:-}" ] && ! grep -qxF -- "${MAN_PAGE}" <<<"${STEMS}"; then
+              fail "declares ${MAN_PAGE} as the page documenting every applet, but no such page is embedded"
+            fi
+            while IFS= read -r a || [ -n "${a}" ]; do
+              [ -n "${a}" ] || continue
+              has=no; grep -qxF -- "${a}" <<<"${STEMS}" && has=yes
+              waived=no
+              case " ${NO_MAN:-} " in *" ${a} "*) waived=yes ;; esac
+              if [ "${has}" = yes ] && [ "${waived}" = yes ]; then
+                fail "${a}: declared noMan but a man page for it IS embedded here"
+              elif [ "${has}" = no ] && [ "${waived}" = no ] && [ -z "${MAN_PAGE:-}" ]; then
+                fail "${a}: announced but carries no man page (declare noMan if upstream documents it nowhere, or manPage if one page documents them all)"
+              fi
+            done <<<"${ALIASES}"
+          }
 
           # Same three reads and two checks as the host sweep — see there for why
           # each exists. The windows half is where the class was actually
@@ -1039,6 +1139,14 @@ jobs:
             fi
             echo "ok      ${a}"
           done <<<"${NAMES}"
+
+          # See the host sweep for why this exists. The stems were read out of
+          # the payload by the pwsh step above — git-bash has no unzip.
+          if [ -n "${ALIASES}" ]; then
+            STEMS="$(tr -d '\r' < manstems.txt | sed '/^$/d' | sort -u)"
+            check_man
+          fi
+
           echo "applets checked=${checked} failures=${fails}"
           [ "${fails}" -eq 0 ]
 
