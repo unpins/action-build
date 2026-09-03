@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The applet sweep no longer fails on a package that embeds no man page at all.
+  Reading the page names out of the payload produced `$null` rather than an
+  empty list when there were none, and writing that out threw. svt-av1, which
+  documents nothing, was the first package to hit it.
+
 ### Added
 
 - The applet sweep now requires a man page for every announced name, on each

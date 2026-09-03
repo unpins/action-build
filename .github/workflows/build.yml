@@ -969,10 +969,14 @@ jobs:
             }
             # Page STEMS only: the man entries are zstd with a shared dict and
             # cannot be inflated here, but the sweep only needs their names.
-            $stems = $zip.Entries |
+            # @(...) is load-bearing: a pipeline that matches nothing assigns
+            # $null, not an empty array, and that overwrites the @() above —
+            # WriteAllLines then throws "Value cannot be null". A package that
+            # embeds no man page at all (svt-av1, noMan) is exactly that case.
+            $stems = @($zip.Entries |
               Where-Object { $_.FullName -like 'unpin/man/*' -and -not $_.FullName.EndsWith('/') } |
               ForEach-Object { $n = $_.FullName.Substring(10); $n -replace '\.[^.]*$','' } |
-              Sort-Object -Unique
+              Sort-Object -Unique)
             $zip.Dispose()
           } catch {
             Write-Host "no zip payload readable: $_"
