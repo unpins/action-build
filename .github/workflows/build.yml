@@ -78,6 +78,21 @@ jobs:
           MANIFEST="$(nix eval --json '.#manifest' 2>/dev/null || echo '{}')"
           echo "Manifest from flake: ${MANIFEST}"
           echo "json=${MANIFEST}" >> "${GITHUB_OUTPUT}"
+      # release.yml computes the tag from `nix eval --raw .#default.version`
+      # and aborts if it does not resolve. Nothing else reads that attribute
+      # on a push, so when the fold stopped carrying `version` onto the
+      # shipped derivation every package in the catalog lost the ability to
+      # release — and it stayed invisible for three months, because Build was
+      # green throughout and a release is only ever cut by hand. Assert the
+      # precondition here, where every push runs it. Costs one eval.
+      - id: version
+        run: |
+          set -euo pipefail
+          if ! UP="$(nix eval --raw '.#default.version' 2>&1)"; then
+            echo "::error::.#default.version does not resolve, so the Release workflow cannot compute a tag: ${UP}"
+            exit 1
+          fi
+          echo "Upstream version: ${UP}"
       - id: resolve
         env:
           MANIFEST: ${{ steps.manifest.outputs.json }}
