@@ -29,7 +29,7 @@ jobs:
       - name: Probes
         shell: bash
         run: |
-          set -uo pipefail
+          set +e -u
           try() {
             local label="$1"; shift
             local limit="$1"; shift
@@ -42,7 +42,8 @@ jobs:
             [ -s log.txt ] && { echo "    --- stdout/stderr:"; sed 's/^/    /' log.txt; }
             [ -s out.txt ] && { echo "    --- out.txt:"; sed 's/^/    /' out.txt; } || echo "    out.txt: absent"
           }
-          try "notepad (does any GUI app exit when killed?)" 5 ./gvim.exe --help
+          # --help/--version are known to hang on a GUI vim (no console to
+          # print to), so they say nothing; start where the script runs.
           try "gvim -f -u NONE -c qa!" 20 ./gvim.exe -f -u NONE -U NONE -i NONE -c 'qa!'
           try "gvim -f -u NONE write+qa" 20 ./gvim.exe -f -u NONE -U NONE -i NONE \
             -c 'call writefile(["written"],"out.txt")' -c 'qa!'
@@ -50,5 +51,11 @@ jobs:
             -c 'call writefile(["written-v"],"out.txt")' -c 'qa!'
           echo "=== still-running processes"
           tasklist //FI "IMAGENAME eq gvim.exe" || true
+          echo "=== a plain windowed app can be started and killed"
+          cmd //c start "" notepad.exe
+          sleep 2
+          tasklist //FI "IMAGENAME eq notepad.exe"
+          taskkill //F //IM notepad.exe
           echo "=== Defender detections"
           powershell -Command "Get-MpThreatDetection | Select-Object -First 5 | Format-List" || true
+          exit 0
