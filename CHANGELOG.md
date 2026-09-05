@@ -11,6 +11,20 @@
 
 ### Added
 
+- A GUI-subsystem `.exe` can now be smoked. `smokeWindows = false` says the
+  binary has no console and so no stdout to grep, and until now that meant CI
+  built it, unpacked it, checked its PE header — and never ran it. gvim.exe
+  shipped for months with an embedded runtime tree that opened files by exact
+  name and returned nothing to any glob; no step in this workflow could have
+  noticed.
+
+  The new `smoke_windows_gui` manifest field (nix-lib `smokeWindowsGui`) says
+  how to make the binary answer in a file instead: `files` are written next to
+  the `.exe`, `args` run it, and `outFile` must exist afterwards and match
+  `pattern`. Same 120 s alarm as the stdout smoke — a GUI process that dies at
+  startup puts up a modal dialog nobody can dismiss, so the timeout is what
+  stands between a broken build and the job's own limit.
+
 - The applet sweep now requires a man page for every announced name, on each
   target it sweeps. A name the user can run and cannot read about is a
   half-shipped program, and it failed quietly: `unpin man <pkg> <name>` found

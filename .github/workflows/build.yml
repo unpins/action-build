@@ -46,6 +46,10 @@ jobs:
       # "false" when the caller declares its .exe is GUI-subsystem, which has
       # no console and so no stdout to smoke. Gates the smoke_windows job.
       smoke_windows: ${{ steps.resolve.outputs.smoke_windows }}
+      # The file-writing smoke that runs in place of the stdout one when the
+      # .exe is GUI-subsystem: {files, args, outFile, pattern} as compact JSON,
+      # or "null" when the caller declares none.
+      smoke_windows_gui: ${{ steps.resolve.outputs.smoke_windows_gui }}
       # JSON array of Apple PrivateFramework names the darwin portability
       # check accepts for this package (per-package exception). "[]" when
       # the caller flake doesn't opt in.
@@ -123,6 +127,9 @@ jobs:
           # value this key is ever set to. `has` distinguishes absent (an older
           # nix-lib — keep smoking windows) from a declared false.
           SMOKE_WIN="$(jq -r 'if has("smoke_windows") then .smoke_windows else true end' <<<"${MANIFEST}")"
+          # Compact so it fits one GITHUB_OUTPUT line: the probe file contents
+          # carry newlines, and jq -c escapes them inside the JSON string.
+          SMOKE_GUI="$(jq -c '.smoke_windows_gui // null' <<<"${MANIFEST}")"
           # JSON array (compact) of allowed Apple PrivateFrameworks; "[]" when
           # the caller flake doesn't opt in. Consumed by the darwin branch of
           # the "Verify binary is portable" step.
@@ -148,6 +155,7 @@ jobs:
           echo "smoke=${SMOKE}" >> "${GITHUB_OUTPUT}"
           echo "smoke_pattern=${SMOKE_PAT}" >> "${GITHUB_OUTPUT}"
           echo "smoke_windows=${SMOKE_WIN}" >> "${GITHUB_OUTPUT}"
+          echo "smoke_windows_gui=${SMOKE_GUI}" >> "${GITHUB_OUTPUT}"
           echo "darwin_allow_private_frameworks=${DARWIN_PF}" >> "${GITHUB_OUTPUT}"
           echo "applets_no_help=${NOHELP}" >> "${GITHUB_OUTPUT}"
           echo "applets_no_man=${NOMAN}" >> "${GITHUB_OUTPUT}"
@@ -917,6 +925,65 @@ jobs:
             Write-Host "::error::smokeWindows = false, but this .exe is not GUI-subsystem ($sub) — it has a console and must be smoked"
             exit 1
           }
+      - name: Smoke (GUI, writes a file)
+        # The .exe the step above refuses to smoke is still an executable, and a
+        # GUI process that writes no stdout can write a FILE. The package
+        # declares what to run and what the file must say; run it here, or this
+        # binary is one CI builds, unpacks and inspects but never EXECUTES —
+        # which is how gvim.exe shipped an embedded runtime tree that opened by
+        # exact name and returned nothing to any glob.
+        if: needs.preflight.outputs.smoke_windows == 'false' && needs.preflight.outputs.smoke_windows_gui != 'null'
+        shell: bash
+        env:
+          GUI_JSON: ${{ needs.preflight.outputs.smoke_windows_gui }}
+        run: |
+          set -euo pipefail
+          # The probe files land next to smoke.exe, which is also the cwd the
+          # .exe inherits — so `outFile` and the args are plain relative names.
+          while IFS= read -r f; do
+            jq -r --arg f "${f}" '.files[$f]' <<<"${GUI_JSON}" > "${f}"
+            echo "wrote ${f}"
+          done < <(jq -r '(.files // {}) | keys[]' <<<"${GUI_JSON}")
+          OUT="$(jq -r '.outFile' <<<"${GUI_JSON}" | tr -d '\r')"
+          PAT="$(jq -r '.pattern // ""' <<<"${GUI_JSON}")"
+          # tr -d '\r' for the same reason as the stdout smoke: git-bash's jq
+          # emits CRLF and the arg would reach the .exe with a trailing \r.
+          ARGS=()
+          while IFS= read -r arg; do
+            ARGS+=("$(printf '%s' "${arg}" | tr -d '\r')")
+          done < <(jq -r '.args[]' <<<"${GUI_JSON}")
+          rm -f "${OUT}"
+          echo "Running: smoke.exe ${ARGS[*]}"
+          # A GUI .exe that fails at startup puts up a modal dialog nobody can
+          # dismiss, so the alarm is not optional here — it is the only thing
+          # between a broken build and the job's own limit.
+          LIMIT=120
+          run() { perl -e 'alarm shift; exec @ARGV' "${LIMIT}" "$@" </dev/null 2>&1; }
+          run true >/dev/null || {
+            echo "::error::the alarm wrapper does not run here (perl missing?)"
+            exit 1
+          }
+          if OUTPUT="$(run ./smoke.exe "${ARGS[@]}")"; then
+            [ -n "${OUTPUT}" ] && echo "${OUTPUT}"
+          else
+            rc=$?
+            echo "${OUTPUT}"
+            if [ "${rc}" -eq 142 ]; then
+              echo "::error::GUI smoke did not finish within ${LIMIT}s"
+            else
+              echo "::error::GUI smoke exited ${rc}"
+            fi
+            exit 1
+          fi
+          if [ ! -s "${OUT}" ]; then
+            echo "::error::GUI smoke exited 0 but wrote no ${OUT}"
+            exit 1
+          fi
+          cat "${OUT}"
+          if [ -n "${PAT}" ] && ! grep -Eq -- "${PAT}" "${OUT}"; then
+            echo "::error::${OUT} did not match pattern: ${PAT}"
+            exit 1
+          fi
       - name: Smoke
         # A GUI-subsystem .exe gets no console, so it can never write the stdout
         # this greps — see the guard above.
