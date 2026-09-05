@@ -947,8 +947,13 @@ jobs:
           set -euo pipefail
           # The probe files land next to smoke.exe, which is also the cwd the
           # .exe inherits — so `outFile` and the args are plain relative names.
+          #
+          # tr -d '\r' is load-bearing: git-bash's jq writes CRLF, and a script
+          # the .exe then interprets gets a \r on the end of every line. gvim
+          # measured — `qa!\r` is not a command, the quit never happens, and a
+          # windowed program that fails to quit hangs until the step's limit.
           while IFS= read -r f; do
-            jq -r --arg f "${f}" '.files[$f]' <<<"${GUI_JSON}" > "${f}"
+            jq -r --arg f "${f}" '.files[$f]' <<<"${GUI_JSON}" | tr -d '\r' > "${f}"
             echo "wrote ${f}"
           done < <(jq -r '(.files // {}) | keys[]' <<<"${GUI_JSON}")
           OUT="$(jq -r '.outFile' <<<"${GUI_JSON}" | tr -d '\r')"
