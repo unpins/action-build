@@ -932,6 +932,13 @@ jobs:
         # binary is one CI builds, unpacks and inspects but never EXECUTES —
         # which is how gvim.exe shipped an embedded runtime tree that opened by
         # exact name and returned nothing to any glob.
+        #
+        # Started in the background and waited on by watching for the file,
+        # not by waiting for the process: a windowed program on a runner with
+        # no interactive desktop can do its work and still not tear down (gvim
+        # measured — its `qa!` returns on a normal Windows session and hangs
+        # here). What the smoke is asking is whether the binary RAN and reached
+        # its payload, so the file is the answer and the exit is a footnote.
         if: needs.preflight.outputs.smoke_windows == 'false' && needs.preflight.outputs.smoke_windows_gui != 'null'
         shell: bash
         env:
@@ -954,34 +961,40 @@ jobs:
           done < <(jq -r '.args[]' <<<"${GUI_JSON}")
           rm -f "${OUT}"
           echo "Running: smoke.exe ${ARGS[*]}"
-          # A GUI .exe that fails at startup puts up a modal dialog nobody can
-          # dismiss, so the alarm is not optional here — it is the only thing
-          # between a broken build and the job's own limit.
           LIMIT=120
-          run() { perl -e 'alarm shift; exec @ARGV' "${LIMIT}" "$@" </dev/null 2>&1; }
-          run true >/dev/null || {
-            echo "::error::the alarm wrapper does not run here (perl missing?)"
-            exit 1
-          }
-          if OUTPUT="$(run ./smoke.exe "${ARGS[@]}")"; then
-            [ -n "${OUTPUT}" ] && echo "${OUTPUT}"
+          ./smoke.exe "${ARGS[@]}" </dev/null >gui-smoke.log 2>&1 &
+          pid=$!
+          # `if`, not `[ … ] && break`: a failing && list is what `set -e`
+          # exits on, and the file is legitimately absent on the first pass.
+          for _ in $(seq 1 "${LIMIT}"); do
+            if [ -s "${OUT}" ]; then break; fi
+            kill -0 "${pid}" 2>/dev/null || break
+            sleep 1
+          done
+          rc=0
+          if kill -0 "${pid}" 2>/dev/null; then
+            echo "note: still running after ${LIMIT}s at most; terminating it"
+            kill "${pid}" 2>/dev/null || true
+            wait "${pid}" 2>/dev/null || true
           else
-            rc=$?
-            echo "${OUTPUT}"
-            if [ "${rc}" -eq 142 ]; then
-              echo "::error::GUI smoke did not finish within ${LIMIT}s"
-            else
-              echo "::error::GUI smoke exited ${rc}"
-            fi
-            exit 1
+            wait "${pid}" || rc=$?
           fi
+          # A GUI .exe writes nothing here, but a startup failure that DOES
+          # reach a stream is worth seeing before the file check below.
+          if [ -s gui-smoke.log ]; then cat gui-smoke.log; fi
           if [ ! -s "${OUT}" ]; then
-            echo "::error::GUI smoke exited 0 but wrote no ${OUT}"
+            echo "::error::smoke.exe wrote no ${OUT} (exit ${rc})"
             exit 1
           fi
           cat "${OUT}"
           if [ -n "${PAT}" ] && ! grep -Eq -- "${PAT}" "${OUT}"; then
             echo "::error::${OUT} did not match pattern: ${PAT}"
+            exit 1
+          fi
+          # Only now: a nonzero exit with the right file is still a failure,
+          # but the file says more about why than the code does.
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::smoke.exe exited ${rc}"
             exit 1
           fi
       - name: Smoke

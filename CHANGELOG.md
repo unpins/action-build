@@ -21,9 +21,14 @@
   The new `smoke_windows_gui` manifest field (nix-lib `smokeWindowsGui`) says
   how to make the binary answer in a file instead: `files` are written next to
   the `.exe`, `args` run it, and `outFile` must exist afterwards and match
-  `pattern`. Same 120 s alarm as the stdout smoke — a GUI process that dies at
-  startup puts up a modal dialog nobody can dismiss, so the timeout is what
-  stands between a broken build and the job's own limit.
+  `pattern`.
+
+  The step waits for the FILE, not for the process. Measured on the runner:
+  gvim.exe runs its script and writes the file, then does not tear down —
+  `:qa!` returns on a normal Windows session and hangs on a runner with no
+  interactive desktop. What the smoke asks is whether the binary ran and
+  reached its payload, so the file is the answer; the process is terminated
+  after at most 120 s and a nonzero exit still fails.
 
 - The applet sweep now requires a man page for every announced name, on each
   target it sweeps. A name the user can run and cannot read about is a
