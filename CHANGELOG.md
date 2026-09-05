@@ -23,10 +23,12 @@
   the `.exe`, `args` run it, and `outFile` must exist afterwards and match
   `pattern`.
 
-  The probe files are written with LF endings — git-bash's jq emits CRLF,
-  and a script the .exe interprets then carries a `\r` on every line.
-  Measured on the runner: gvim read `qa!\r`, which is not a command, so it
-  never quit and the step hit its limit with nothing written.
+  The probe file's NAME is stripped of `\r`, and so are its contents.
+  git-bash's jq emits CRLF, so the key came back as `probe.vim\r` and the
+  file was written under that name; `-S probe.vim` then found nothing,
+  gvim raised its error and waited for a keypress that a runner cannot
+  give. The log said `wrote probe.vim` throughout, because a carriage
+  return is invisible there.
 
   The step waits for the FILE, not for the process. The first run on
   windows-2022 timed out with gvim.exe still alive after 120 s, and waiting
