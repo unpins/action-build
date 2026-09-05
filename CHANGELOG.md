@@ -23,12 +23,14 @@
   the `.exe`, `args` run it, and `outFile` must exist afterwards and match
   `pattern`.
 
-  The step waits for the FILE, not for the process. Measured on the runner:
-  gvim.exe runs its script and writes the file, then does not tear down —
-  `:qa!` returns on a normal Windows session and hangs on a runner with no
-  interactive desktop. What the smoke asks is whether the binary ran and
-  reached its payload, so the file is the answer; the process is terminated
-  after at most 120 s and a nonzero exit still fails.
+  The step waits for the FILE, not for the process. The first run on
+  windows-2022 timed out with gvim.exe still alive after 120 s, and waiting
+  on the process could not say whether it had done its work: a windowed
+  program on a runner with no interactive desktop may write everything it
+  was asked to and still not tear down. What the smoke asks is whether the
+  binary ran and reached its payload, so the file is the answer — the poll
+  ends the moment it appears, a process still alive at the end is terminated
+  and reported, and a run that writes nothing or exits nonzero fails.
 
 - The applet sweep now requires a man page for every announced name, on each
   target it sweeps. A name the user can run and cannot read about is a
