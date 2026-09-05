@@ -49,6 +49,19 @@ jobs:
             -c 'call writefile(["written"],"out.txt")' -c 'qa!'
           try "gvim -f -v (console flag)" 20 ./gvim.exe -f -v -u NONE -U NONE -i NONE \
             -c 'call writefile(["written-v"],"out.txt")' -c 'qa!'
+          # The smoke's exact args and script, on this (older) binary: separates
+          # "-S / this script" from "the newer .exe".
+          cat > probe.vim <<'VIM'
+call writefile(["unpins-runtime-ok "
+  \ .len(readfile($VIMRUNTIME."/filetype.vim"))." lines "
+  \ .len(getcompletion("", "color"))." colors"], "out.txt")
+qa!
+VIM
+          try "gvim -S probe.vim (the smoke's own args)" 30 \
+            ./gvim.exe -f -N -u NONE -U NONE -i NONE -S probe.vim
+          try "gvim -S, no -U/-i" 30 ./gvim.exe -f -N -u NONE -S probe.vim
+          try "gvim -c source probe.vim" 30 ./gvim.exe -f -N -u NONE -U NONE -i NONE \
+            -c 'source probe.vim'
           echo "=== still-running processes"
           tasklist //FI "IMAGENAME eq gvim.exe" || true
           echo "=== a plain windowed app can be started and killed"
