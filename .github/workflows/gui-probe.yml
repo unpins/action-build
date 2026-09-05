@@ -1,0 +1,53 @@
+name: GUI probe (temporary)
+
+# Throwaway: answers whether a GUI-subsystem .exe can run at all on the hosted
+# windows runner. Delete once the question is settled.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-2022
+    steps:
+      - name: Who and where
+        shell: pwsh
+        run: |
+          whoami
+          Write-Host "SessionId = $((Get-Process -Id $PID).SessionId)"
+          query session 2>$null
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled | Format-List
+      - name: Fetch a gvim.exe from the latest release
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSL -o gvim.zst "$(curl -sS https://api.github.com/repos/unpins/gvim/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith("x86_64-windows.exe.zst")) | .browser_download_url')"
+          choco install zstandard -y --no-progress >/dev/null
+          zstd -d gvim.zst -o gvim.exe
+          ls -l gvim.exe
+      - name: Probes
+        shell: bash
+        run: |
+          set -uo pipefail
+          try() {
+            local label="$1"; shift
+            local limit="$1"; shift
+            rm -f out.txt
+            echo "=== ${label}"
+            local start=$SECONDS
+            perl -e 'alarm shift; exec @ARGV' "${limit}" "$@" </dev/null >log.txt 2>&1
+            local rc=$?
+            echo "    rc=${rc} elapsed=$((SECONDS-start))s"
+            [ -s log.txt ] && { echo "    --- stdout/stderr:"; sed 's/^/    /' log.txt; }
+            [ -s out.txt ] && { echo "    --- out.txt:"; sed 's/^/    /' out.txt; } || echo "    out.txt: absent"
+          }
+          try "notepad (does any GUI app exit when killed?)" 5 ./gvim.exe --help
+          try "gvim -f -u NONE -c qa!" 20 ./gvim.exe -f -u NONE -U NONE -i NONE -c 'qa!'
+          try "gvim -f -u NONE write+qa" 20 ./gvim.exe -f -u NONE -U NONE -i NONE \
+            -c 'call writefile(["written"],"out.txt")' -c 'qa!'
+          try "gvim -f -v (console flag)" 20 ./gvim.exe -f -v -u NONE -U NONE -i NONE \
+            -c 'call writefile(["written-v"],"out.txt")' -c 'qa!'
+          echo "=== still-running processes"
+          tasklist //FI "IMAGENAME eq gvim.exe" || true
+          echo "=== Defender detections"
+          powershell -Command "Get-MpThreatDetection | Select-Object -First 5 | Format-List" || true
