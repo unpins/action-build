@@ -16,6 +16,7 @@ jobs:
           Write-Host "SessionId = $((Get-Process -Id $PID).SessionId)"
           query session 2>$null
           Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled | Format-List
+          exit 0
       - name: Fetch a gvim.exe from the latest release
         shell: bash
         run: |
