@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Release notes now lead with the README's whole opening sentence. Only its
+  first line was used, so every opening wrapped over several lines — oksh,
+  xvnc, mksh and six more — would have been published cut off mid-sentence.
+  A README with no opening link line (unpin's) no longer picks up an
+  unrelated link from further down as its headline; it gets the generic one.
+
 - The applet sweep no longer fails on a package that embeds no man page at all.
   Reading the page names out of the payload produced `$null` rather than an
   empty list when there were none, and writing that out threw. svt-av1, which
