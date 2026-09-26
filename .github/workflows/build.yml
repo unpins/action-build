@@ -71,6 +71,8 @@ jobs:
       applets_by_target: ${{ steps.resolve.outputs.applets_by_target }}
       has_windows: ${{ steps.matrix.outputs.has_windows }}
       hosts: ${{ steps.matrix.outputs.hosts }}
+      # The README's opening paragraph, as the release body publishes it.
+      readme_opening: ${{ steps.readme.outputs.opening }}
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
@@ -97,6 +99,41 @@ jobs:
             exit 1
           fi
           echo "Upstream version: ${UP}"
+      # The release body leads with the README's opening paragraph. Nothing
+      # else reads it on a push and a release is only ever cut by hand, so a
+      # README that lost its opening would degrade every release body to a
+      # generic line in silence, the way `.#default.version` above did for
+      # three months. Assert it here, and hand the release job the very text
+      # it will publish, so the check and the body cannot disagree.
+      - id: readme
+        run: |
+          set -euo pipefail
+          if [ ! -f README.md ]; then
+            echo "::error::README.md is missing: the release body has no opening paragraph to lead with"
+            exit 1
+          fi
+          # The first prose paragraph after the H1, joined into one line:
+          # openings are hard-wrapped, and GitHub renders a single newline in a
+          # release body as <br>. Badge, image, HTML, blockquote, fence and
+          # table lines are not prose; the search stops at the first section.
+          OPEN="$(awk '
+            /^## /                          { exit }
+            !s && /^(#|!\[|\[!|<|>|```|\|)/ { next }
+            !s && /[^[:space:]]/            { s = 1; o = $0; next }
+            s && /^[[:space:]]*$/           { exit }
+            s                               { sub(/^[[:space:]]+/, ""); o = o " " $0 }
+            END                             { if (s) print o }
+          ' README.md)"
+          if [ -z "${OPEN}" ]; then
+            echo "::error::README.md has no opening paragraph before its first '## ' section: the release body would fall back to a generic line"
+            exit 1
+          fi
+          echo "Release headline body: ${OPEN}"
+          {
+            echo "opening<<__README_OPENING__"
+            printf '%s\n' "${OPEN}"
+            echo "__README_OPENING__"
+          } >> "${GITHUB_OUTPUT}"
       - id: resolve
         env:
           MANIFEST: ${{ steps.manifest.outputs.json }}
@@ -1287,37 +1324,27 @@ jobs:
         env:
           PKG: ${{ needs.preflight.outputs.package_name }}
           TAG: ${{ inputs.release_tag }}
+          # Through env, never `${{ }}` in the script: the README is arbitrary
+          # text and interpolating it would be a command injection.
+          README_OPENING: ${{ needs.preflight.outputs.readme_opening }}
         run: |
           set -euo pipefail
           # Display version: strip leading "v" and a trailing "-<pkgrel>".
           VER="${TAG#v}"
           VER="${VER%-*}"
 
-          # Headline: reuse the README's opening sentence verbatim (it carries
-          # the upstream link) and splice the version in right after the linked
-          # name, so the release leads with the same sentence users see in the
-          # README. The opening is the first paragraph after the H1 that starts
-          # with "[" but not "[!" (which is a badge/image), joined into one line:
-          # openings are hard-wrapped, and taking only the first line cut nine
-          # headlines off mid-sentence. The search stops at the first `## `, or
-          # a README with no such opening (unpin's) would lead its release with
-          # whatever link line comes first further down. Fall back to a generic
-          # line if the README has no such opening.
-          HEADLINE="**${PKG} ${VER}** — a single self-contained binary, built natively per platform."
-          if [ -f README.md ]; then
-            OPEN="$(awk '
-              /^## /                { exit }
-              !s && /^\[[^!]/       { s = 1; o = $0; next }
-              s && /^[[:space:]]*$/ { exit }
-              s                     { sub(/^[[:space:]]+/, ""); o = o " " $0 }
-              END                   { if (s) print o }
-            ' README.md)"
-            if [ -n "${OPEN}" ]; then
-              HEADLINE="$(printf '%s' "${OPEN}" | awk -v ver="${VER}" '
-                { i = index($0, ") "); if (i > 0) print substr($0,1,i) " " ver substr($0,i+1); else print }
-              ')"
-            fi
-          fi
+          # Headline: the package and its version on a line of their own, then
+          # the README's opening paragraph verbatim — preflight's copy of it, so
+          # the text asserted there is the text published here. The version used
+          # to be spliced into that sentence after its first link, which took
+          # every opening to begin by naming the software: 23 of 112 READMEs
+          # write correct English with a lead-in first ("The
+          # [libjpeg-turbo](…) command-line programs as …") and lost their
+          # sentence to the generic line, and in three the first link names the
+          # project or a dependency, where the version would have landed on the
+          # wrong noun. Nothing is spliced now, so the prose is whatever the
+          # README says.
+          OPEN="${README_OPENING:-A single self-contained binary, built natively per platform.}"
 
           # Provenance: the nixpkgs base this binary was built on. It is a
           # standing fact of every release (not a discrete change, so it lives
@@ -1348,7 +1375,9 @@ jobs:
           fi
 
           {
-            echo "${HEADLINE}"
+            echo "**${PKG} ${VER}**"
+            echo
+            echo "${OPEN}"
             echo
             echo "Install with [unpin](https://github.com/unpins/unpin):"
             echo
