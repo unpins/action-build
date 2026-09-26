@@ -89,13 +89,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # Promote the changelog's rolling `## [Unreleased]` section to a
-          # `## [<tag>] - <date>` heading and commit it back to main, so the
-          # tag we cut includes the stamped changelog and the release job can
-          # extract that section for the release body. Skipped (no-op) for
-          # repos that haven't adopted a CHANGELOG.md yet.
+          # `## [<version>] - <date>` heading and commit it back to main, so
+          # the tag we cut includes the stamped changelog and the release job
+          # can extract that section for the release body. The heading drops
+          # the tag's leading `v`, as Keep a Changelog spells it; build.yml
+          # reads either spelling, so the headings stamped before this still
+          # produce a release body. Skipped (no-op) for repos that haven't
+          # adopted a CHANGELOG.md yet.
           if [ -f CHANGELOG.md ] && grep -q '^## \[Unreleased\]' CHANGELOG.md; then
             DATE="$(date +%Y-%m-%d)"
-            awk -v hdr="## [${TAG}] - ${DATE}" '
+            awk -v hdr="## [${TAG#v}] - ${DATE}" '
               !done && /^## \[Unreleased\]/ { print; print ""; print hdr; done=1; next }
               { print }
             ' CHANGELOG.md > CHANGELOG.md.new

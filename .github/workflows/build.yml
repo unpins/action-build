@@ -1362,10 +1362,12 @@ jobs:
 
           SECTION=""
           if [ -f CHANGELOG.md ]; then
-            # Pull the lines under "## [<tag>]" up to the next "## " heading.
-            # Match the heading by prefix: it is "## [<tag>] - <date>".
-            SECTION="$(awk -v prefix="## [${TAG}]" '
-              index($0, prefix) == 1 { grab=1; next }
+            # Pull the lines under "## [<version>]" up to the next "## "
+            # heading. Match by prefix: the heading is "## [<version>] - <date>"
+            # with the tag's leading `v` dropped, and either spelling is read so
+            # the headings stamped as "## [v<tag>]" before that still resolve.
+            SECTION="$(awk -v nov="## [${TAG#v}]" -v tag="## [${TAG}]" '
+              index($0, nov) == 1 || index($0, tag) == 1 { grab=1; next }
               grab && /^## / { exit }
               grab { print }
             ' CHANGELOG.md | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba}')"
