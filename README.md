@@ -48,10 +48,9 @@ jobs:
 | Input              | Type      | Default | Purpose                                                                                            |
 | ------------------ | --------- | ------- | -------------------------------------------------------------------------------------------------- |
 | `package_name`     | string    | —       | Name of the binary in `result/bin/`. Also the prefix of the published artifact.                    |
-| `package_data`     | boolean   | `false` | Also publish `result/share` as a `.tar.zst` (man pages, completions, etc.).                        |
 | `bootstrap_naming` | boolean   | `false` | Use `<pkg>-<arch>-<os>[.exe]` instead of `<pkg>-<version>-<os>-<arch>[.exe]`. See below.           |
 | `create_release`   | boolean   | `false` | Create a GitHub Release in the calling repo (only `build.yml`).                                    |
-| `platforms`        | JSON      | 4 native targets | Matrix of `{runner, os, arch, attr?}`. Add Windows by setting `attr` to a `pkgsCross` derivation. |
+| `release_tag`      | string    | —       | Tag the release is cut at (only `build.yml`, set by `release.yml`).                                 |
 
 ### `bootstrap_naming`
 

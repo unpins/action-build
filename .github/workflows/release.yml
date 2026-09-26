@@ -22,9 +22,6 @@ on:
       package_name:
         type: string
         default: ""
-      package_data:
-        type: boolean
-        default: false
       bootstrap_naming:
         type: boolean
         default: false
@@ -120,7 +117,6 @@ jobs:
       # Inputs are forwarded as-is; build.yml's preflight resolves them
       # against the manifest. Empty values defer to manifest entirely.
       package_name: ${{ inputs.package_name }}
-      package_data: ${{ inputs.package_data }}
       bootstrap_naming: ${{ inputs.bootstrap_naming }}
       create_release: true
       release_tag: ${{ needs.tag.outputs.tag }}

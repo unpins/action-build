@@ -12,9 +12,6 @@ on:
       package_name:
         type: string
         default: ""
-      package_data:
-        type: boolean
-        default: false
       bootstrap_naming:
         type: boolean
         default: false
@@ -35,7 +32,6 @@ jobs:
     outputs:
       include: ${{ steps.matrix.outputs.include }}
       package_name: ${{ steps.resolve.outputs.package_name }}
-      package_data: ${{ steps.resolve.outputs.package_data }}
       bootstrap_naming: ${{ steps.resolve.outputs.bootstrap_naming }}
       # JSON array of CLI args, e.g. `["--version"]`, or "null" when the
       # caller flake doesn't opt in. Consumed by the Smoke step in build
@@ -138,7 +134,6 @@ jobs:
         env:
           MANIFEST: ${{ steps.manifest.outputs.json }}
           IN_NAME: ${{ inputs.package_name }}
-          IN_DATA: ${{ inputs.package_data }}
           IN_BOOT: ${{ inputs.bootstrap_naming }}
         run: |
           set -euo pipefail
@@ -150,8 +145,6 @@ jobs:
             echo "::error::no package_name input and no .#manifest.name in caller flake"
             exit 1
           fi
-          DATA="${IN_DATA}"
-          if [ "${DATA}" = "false" ]; then DATA="$(jq -r '.package_data // false' <<<"${MANIFEST}")"; fi
           BOOT="${IN_BOOT}"
           if [ "${BOOT}" = "false" ]; then BOOT="$(jq -r '.bootstrap_naming // false' <<<"${MANIFEST}")"; fi
           # `.smoke` is null when not opted in, otherwise an array. jq emits
@@ -185,9 +178,8 @@ jobs:
           # Passed through whole; each sweep picks its own key. "{}" from an
           # older nix-lib leaves every sweep exactly as it was.
           BY_TARGET="$(jq -c '.applets_by_target // {}' <<<"${MANIFEST}")"
-          echo "Resolved: name=${NAME} package_data=${DATA} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT} smoke_windows=${SMOKE_WIN} darwin_allow_private_frameworks=${DARWIN_PF}"
+          echo "Resolved: name=${NAME} bootstrap_naming=${BOOT} smoke=${SMOKE} smoke_pattern=${SMOKE_PAT} smoke_windows=${SMOKE_WIN} darwin_allow_private_frameworks=${DARWIN_PF}"
           echo "package_name=${NAME}" >> "${GITHUB_OUTPUT}"
-          echo "package_data=${DATA}" >> "${GITHUB_OUTPUT}"
           echo "bootstrap_naming=${BOOT}" >> "${GITHUB_OUTPUT}"
           echo "smoke=${SMOKE}" >> "${GITHUB_OUTPUT}"
           echo "smoke_pattern=${SMOKE_PAT}" >> "${GITHUB_OUTPUT}"
@@ -845,7 +837,6 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
-          WANT_DATA: ${{ needs.preflight.outputs.package_data }}
           BOOTSTRAP: ${{ needs.preflight.outputs.bootstrap_naming }}
         run: |
           set -euo pipefail
@@ -876,20 +867,6 @@ jobs:
             STEM_BOOT="${PKG}-${ARCH}-${OS}"
             cp "${BIN_SRC}" "out/${STEM_BOOT}${EXT}"
           fi
-          # Data tarball (man pages, runtime files, etc). One asset per
-          # release, not per platform: vim/gvim runtime is Vimscript/syntax
-          # text — identical on every target. Gate on the native Linux x86_64
-          # job to pick a single producer; the other matrix jobs ignore data
-          # and the tarball gets uploaded once. unpin pairs it with primary
-          # assets by tag in preflight (see install.rs::find_companion).
-          if [ "${WANT_DATA}" = "true" ] \
-             && [ -d "${OUT_DIR}/share" ] \
-             && [ "${OS}" = "linux" ] \
-             && [ "${ARCH}" = "x86_64" ]; then
-            DATA_STEM="${PKG}-${VERSION}-data"
-            tar --zstd -cf "out/${DATA_STEM}.tar.zst" -C "${OUT_DIR}" share
-          fi
-
           # SHA-256 sidecar per artifact. `openssl dgst -r` emits the sha256sum
           # format (`<hash>  <filename>`); openssl is pre-installed on every
           # runner image (ubuntu-latest, ubuntu-24.04-arm, macos-14), unlike
