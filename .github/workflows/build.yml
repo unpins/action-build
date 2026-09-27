@@ -619,6 +619,10 @@ jobs:
             echo "::error::the alarm wrapper does not run here (perl missing?)"
             exit 1
           }
+          # 128+n is also a plain exit status (git dies with 128, and 129 is
+          # its usage error): in that range, ask wait(2) whether a signal ended
+          # the run. Succeeds only if one did.
+          signalled() { perl -e 'alarm shift; system @ARGV; exit(($? & 127) ? 0 : 1)' "${LIMIT}" "$@" </dev/null >/dev/null 2>&1; }
 
           # The dispatcher's own output, verbatim from nix-lib. Seeing it means
           # the name never reached a program. Compared as literal prefixes, not
@@ -782,7 +786,7 @@ jobs:
             # 128+signo, and only the 31 standard signals — a plain exit(255)
             # is a legitimate status (mtools' mzip refuses that way when the
             # host has no SCSI).
-            if [ "${RC}" -ge 128 ] && [ "${RC}" -le 159 ]; then
+            if [ "${RC}" -ge 128 ] && [ "${RC}" -le 159 ] && signalled "${WORK}/${a}" --help; then
               fail "${a}: killed by signal (rc=${RC})"; continue
             fi
             FIRST="$(head -1 <<<"${OUT}")"
@@ -1128,6 +1132,10 @@ jobs:
             echo "::error::the alarm wrapper does not run here (perl missing?)"
             exit 1
           }
+          # 128+n is also a plain exit status (git dies with 128, and 129 is
+          # its usage error): in that range, ask wait(2) whether a signal ended
+          # the run. Succeeds only if one did.
+          signalled() { perl -e 'alarm shift; system @ARGV; exit(($? & 127) ? 0 : 1)' "${LIMIT}" "$@" </dev/null >/dev/null 2>&1; }
 
           LIST_HEAD="${PKG} is one binary with several programs:"
           NOSELECT="${PKG}: select a program with --unpin-program="
@@ -1250,7 +1258,7 @@ jobs:
             if [ "${RC}" -eq 142 ]; then
               fail "${a}: --help did not return within ${LIMIT}s"; continue
             fi
-            if [ "${RC}" -ge 128 ] && [ "${RC}" -le 159 ]; then
+            if [ "${RC}" -ge 128 ] && [ "${RC}" -le 159 ] && signalled "./applets/${a}.exe" --help; then
               fail "${a}: killed by signal (rc=${RC})"; continue
             fi
             FIRST="$(head -1 <<<"${OUT}" | tr -d '\r')"
